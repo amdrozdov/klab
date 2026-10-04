@@ -4,7 +4,29 @@
 
 <p align="center"><b>Linux kernel lab toolset</b></p>
 
+<p align="center">
+  <a href="https://github.com/amdrozdov/klab/actions/workflows/ci.yml">
+    <img src="https://github.com/amdrozdov/klab/actions/workflows/ci.yml/badge.svg" alt="CI status">
+  </a>
+</p>
+
 Fetch, build, boot and benchmark Linux kernels in QEMU, and compare builds.
+
+## eBPF tracing
+
+`make observe` turns on Grafana telemetry for every boot and benchmark — host and
+guest metrics plus live eBPF probes on the running kernel (syscalls, scheduler,
+block/ext4 latency, page cache). See [Observing](#observing-grafana-telemetry).
+
+<p align="center">
+  <img src="assets/sc2.png" alt="klab overview dashboard" width="800">
+  <br><sub>Overview dashboard</sub>
+</p>
+
+<p align="center">
+  <img src="assets/sc1.png" alt="context switches traced with eBPF" width="800">
+  <br><sub>Context switches, traced with eBPF</sub>
+</p>
 
 The CLI is a uv project (stdlib only, Python >= 3.10). `./lab` is a shim for
 `uv run lab` that works from any directory; `uv sync` creates `.venv` on first use.

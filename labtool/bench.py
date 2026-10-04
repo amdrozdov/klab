@@ -12,6 +12,8 @@ in bench.sh configure it:
     # iterations: 1        (run once per boot regardless of --repeat, e.g. boot time)
 """
 
+from __future__ import annotations
+
 import contextlib
 import json
 import platform
@@ -19,7 +21,9 @@ import re
 import shutil
 import statistics
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from . import common, observe
 from .common import BENCHMARKS, RUNS, LabError, info, remove_tree, run, show, table, warn
@@ -31,8 +35,9 @@ METRIC_RE = re.compile(r"^METRIC\s+(\S+)\s+([-+0-9.eE]+)\s*(\S*)\s*(higher|lower
 
 # --------------------------------------------------------------------------- benchmarks
 
-def bench_header(name):
-    hdr = {}
+
+def bench_header(name: str) -> dict[str, str]:
+    hdr: dict[str, str] = {}
     for line in (BENCHMARKS / name / "bench.sh").read_text().splitlines()[:20]:
         m = re.match(r"#\s*(\w+):\s*(.+)", line)
         if m:
@@ -40,21 +45,21 @@ def bench_header(name):
     return hdr
 
 
-def list_benchmarks():
+def list_benchmarks() -> list[str]:
     return sorted(p.name for p in BENCHMARKS.iterdir() if (p / "bench.sh").exists())
 
 
-def resolve_benchmarks(names):
+def resolve_benchmarks(names: Sequence[str]) -> list[str]:
     avail = list_benchmarks()
     if not names or names == ["all"]:
         return avail
     for n in names:
         if n not in avail:
             raise LabError(f"unknown benchmark '{n}' (available: {', '.join(avail)})")
-    return names
+    return list(names)
 
 
-def stage_benchmark(name, dest):
+def stage_benchmark(name: str, dest: Path) -> None:
     shutil.copytree(BENCHMARKS / name, dest)
     for c in dest.glob("*.c"):
         run(["gcc", "-O2", "-static", "-Wall", "-o", c.with_suffix(""), c], quiet=True)
@@ -79,8 +84,8 @@ run_one() {{  # bench iteration
 """
 
 
-def make_job(benches, repeat, warmup):
-    lines = []
+def make_job(benches: Sequence[str], repeat: int, warmup: int) -> str:
+    lines: list[str] = []
     for b in benches:
         iters = int(bench_header(b).get("iterations", 0)) or repeat
         w = 0 if "iterations" in bench_header(b) else warmup
@@ -89,8 +94,8 @@ def make_job(benches, repeat, warmup):
     return JOB_TEMPLATE.format(body="\n".join(lines))
 
 
-def parse_outputs(outdir, benches):
-    results = {}
+def parse_outputs(outdir: Path, benches: Sequence[str]) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
     for b in benches:
         metrics = results.setdefault(b, {})
         files = sorted(outdir.glob(f"{b}.*.txt"))
@@ -98,8 +103,8 @@ def parse_outputs(outdir, benches):
             warn(f"{b}: no output (did the guest run it?)")
         for f in files:
             if f.name.startswith(f"{b}.w"):
-                continue                 # warmup iteration
-            it = f.name[len(b) + 1:-len(".txt")]
+                continue  # warmup iteration
+            it = f.name[len(b) + 1 : -len(".txt")]
             text = f.read_text(errors="replace")
             if "exit=0" not in text:
                 warn(f"{b}: iteration failed, see {f}")
@@ -108,21 +113,35 @@ def parse_outputs(outdir, benches):
                 if not m:
                     continue
                 name, value, unit, better = m.groups()
-                entry = metrics.setdefault(name, {"unit": unit, "better": better or "higher",
-                                                  "values": [], "iters": []})
+                entry = metrics.setdefault(
+                    name,
+                    {
+                        "unit": unit,
+                        "better": better or "higher",
+                        "values": [],
+                        "iters": [],
+                    },
+                )
                 entry["values"].append(float(value))
                 entry["iters"].append(it)
     return results
 
 
-def host_info():
-    def read(p):
+def host_info() -> dict[str, str]:
+    def read(p: str) -> str:
         try:
             return Path(p).read_text().strip()
         except OSError:
             return ""
-    cpu = next((l.split(":", 1)[1].strip() for l in read("/proc/cpuinfo").splitlines()
-                if l.startswith("model name")), "")
+
+    cpu = next(
+        (
+            l.split(":", 1)[1].strip()
+            for l in read("/proc/cpuinfo").splitlines()
+            if l.startswith("model name")
+        ),
+        "",
+    )
     return {
         "hostname": platform.node(),
         "cpu": cpu,
@@ -134,21 +153,38 @@ def host_info():
     }
 
 
-def run_bench(build=None, benches=(), repeat=5, warmup=1, boots=1, cpus=DEFAULT_CPUS,
-              mem=DEFAULT_MEM, pin=None, timeout=900, label=None, verbose=False, append="",
-              no_telemetry=False):
+def run_bench(
+    build: str | None = None,
+    benches: Sequence[str] = (),
+    repeat: int = 5,
+    warmup: int = 1,
+    boots: int = 1,
+    cpus: int = DEFAULT_CPUS,
+    mem: str = DEFAULT_MEM,
+    pin: str | None = None,
+    timeout: float = 900,
+    label: str | None = None,
+    verbose: bool = False,
+    append: str = "",
+    no_telemetry: bool = False,
+) -> str | None:
     build = default_build(build)
     benches = resolve_benchmarks(list(benches))
     meta = build_meta(build)
     run_id = time.strftime("%Y%m%d-%H%M%S") + f"-{build}" + (f"-{label}" if label else "")
     rundir = RUNS / run_id
-    info(f"run {run_id}: {', '.join(benches)} x{repeat} (+{warmup} warmup), {boots} boot(s)")
-    vm_kw = {"cpus": cpus, "mem": mem, "pin": pin, "append": append}
+    info(
+        f"run {run_id}: {', '.join(benches)} x{repeat} "
+        f"(+{warmup} warmup), {boots} boot(s)"
+    )
+    vm_kw: dict[str, Any] = {"cpus": cpus, "mem": mem, "pin": pin, "append": append}
     telemetry = observe.wanted(no_telemetry)
     if telemetry:
         observe.preflight(build)
-        info(f"telemetry on: {observe.GRAFANA_URL}  (eBPF probes add overhead to "
-             "microbenchmarks; --no-telemetry for clean numbers)")
+        info(
+            f"telemetry on: {observe.GRAFANA_URL}  (eBPF probes add overhead to "
+            "microbenchmarks; --no-telemetry for clean numbers)"
+        )
     if common.DRY:
         if telemetry:
             vm_kw["telemetry"] = observe.Session(build, run_id, "bench")
@@ -156,8 +192,8 @@ def run_bench(build=None, benches=(), repeat=5, warmup=1, boots=1, cpus=DEFAULT_
         return None
     rundir.mkdir(parents=True)
 
-    all_results = {}
-    guest = {}
+    all_results: dict[str, dict[str, Any]] = {}
+    guest: dict[str, str] = {}
     for boot_no in range(boots):
         work = rundir / f"boot{boot_no}"
         (work / "benchmarks").mkdir(parents=True)
@@ -168,13 +204,24 @@ def run_bench(build=None, benches=(), repeat=5, warmup=1, boots=1, cpus=DEFAULT_
         info(f"boot {boot_no + 1}/{boots}")
         session = observe.Session(build, run_id, "bench") if telemetry else None
         with session or contextlib.nullcontext():
-            elapsed = run_job(build, work, rundir / f"console{boot_no}.log", timeout,
-                              verbose=verbose, on_line=session and session.on_line,
-                              telemetry=session, **vm_kw)
+            elapsed = run_job(
+                build,
+                work,
+                rundir / f"console{boot_no}.log",
+                timeout,
+                verbose=verbose,
+                on_line=session.on_line if session else None,
+                telemetry=session,
+                **vm_kw,
+            )
         if not (work / "job.exit").exists():
-            raise LabError(f"guest did not complete the job; see {rundir}/console{boot_no}.log")
-        guest = {"kernel_release": (work / "kernel_release").read_text().strip(),
-                 "nproc": (work / "guest_nproc").read_text().strip()}
+            raise LabError(
+                f"guest did not complete the job; see {rundir}/console{boot_no}.log"
+            )
+        guest = {
+            "kernel_release": (work / "kernel_release").read_text().strip(),
+            "nproc": (work / "guest_nproc").read_text().strip(),
+        }
         info(f"boot {boot_no + 1} done in {elapsed:.0f}s")
 
         boot_results = parse_outputs(work / "out", benches)
@@ -183,10 +230,11 @@ def run_bench(build=None, benches=(), repeat=5, warmup=1, boots=1, cpus=DEFAULT_
         for b, metrics in boot_results.items():
             for name, m in metrics.items():
                 dst = all_results.setdefault(b, {}).setdefault(
-                    name, {"unit": m["unit"], "better": m["better"], "values": []})
+                    name, {"unit": m["unit"], "better": m["better"], "values": []}
+                )
                 dst["values"] += m["values"]
 
-    result = {
+    result: dict[str, Any] = {
         "id": run_id,
         "label": label,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -213,7 +261,16 @@ def run_bench(build=None, benches=(), repeat=5, warmup=1, boots=1, cpus=DEFAULT_
     return run_id
 
 
-def _run_bench_dry(build, benches, repeat, warmup, boots, rundir, timeout, vm_kw):
+def _run_bench_dry(
+    build: str,
+    benches: Sequence[str],
+    repeat: int,
+    warmup: int,
+    boots: int,
+    rundir: Path,
+    timeout: float,
+    vm_kw: dict[str, Any],
+) -> None:
     """Print what a run would do: stage benchmarks, write job.sh, boot qemu per boot."""
     job = make_job(benches, repeat, warmup)
     for boot_no in range(boots):
@@ -224,29 +281,44 @@ def _run_bench_dry(build, benches, repeat, warmup, boots, rundir, timeout, vm_kw
             dest = work / "benchmarks" / b
             show(["cp", "-r", BENCHMARKS / b, dest])
             for c in sorted((BENCHMARKS / b).glob("*.c")):
-                show(["gcc", "-O2", "-static", "-Wall", "-o", dest / c.stem, dest / c.name])
+                show(
+                    ["gcc", "-O2", "-static", "-Wall", "-o", dest / c.stem, dest / c.name]
+                )
         print(f"cat > {work / 'job.sh'} <<'EOF'\n{job.rstrip()}\nEOF")
-        info(f"guest runs job.sh and powers off; console -> {rundir}/console{boot_no}.log, "
-             f"timeout {timeout}s")
+        info(
+            f"guest runs job.sh and powers off; "
+            f"console -> {rundir}/console{boot_no}.log, "
+            f"timeout {timeout}s"
+        )
         run_job(build, work, None, timeout, **vm_kw)
 
 
-def _warn_noise(host):
+def _warn_noise(host: Mapping[str, str]) -> None:
     if host["governor"] and host["governor"] != "performance":
-        warn(f"CPU governor is '{host['governor']}'; results will be noisier than with 'performance'")
+        warn(
+            f"CPU governor is '{host['governor']}'; results will be "
+            "noisier than with 'performance'"
+        )
 
 
-# --------------------------------------------------------------------------- stats & tables
+# ------------------------------------------------------------------------- stats & tables
 
-def stats(values):
+
+def stats(values: Sequence[float]) -> dict[str, float]:
     med = statistics.median(values)
     sd = statistics.stdev(values) if len(values) > 1 else 0.0
     mean = statistics.fmean(values)
-    return {"median": med, "stdev": sd, "cv": (sd / mean * 100) if mean else 0.0,
-            "min": min(values), "max": max(values), "n": len(values)}
+    return {
+        "median": med,
+        "stdev": sd,
+        "cv": (sd / mean * 100) if mean else 0.0,
+        "min": min(values),
+        "max": max(values),
+        "n": len(values),
+    }
 
 
-def fmt(v):
+def fmt(v: float) -> str:
     a = abs(v)
     if a == 0:
         return "0"
@@ -257,26 +329,35 @@ def fmt(v):
     return f"{v:.3f}"
 
 
-def summary_table(result):
-    rows = []
+def summary_table(result: Mapping[str, Any]) -> str:
+    rows: list[list[Any]] = []
     for b, metrics in result["results"].items():
         for name, m in metrics.items():
             if not m["values"]:
                 continue
             s = stats(m["values"])
             arrow = "↑" if m["better"] == "higher" else "↓"
-            rows.append([f"{b}/{name}", f"{fmt(s['median'])} {m['unit']}", f"±{s['cv']:.1f}%",
-                         fmt(s["min"]), fmt(s["max"]), s["n"], arrow])
+            rows.append(
+                [
+                    f"{b}/{name}",
+                    f"{fmt(s['median'])} {m['unit']}",
+                    f"±{s['cv']:.1f}%",
+                    fmt(s["min"]),
+                    fmt(s["max"]),
+                    s["n"],
+                    arrow,
+                ]
+            )
     return table(rows, ["metric", "median", "cv", "min", "max", "n", "better"])
 
 
-def list_runs():
+def list_runs() -> list[str]:
     if not RUNS.exists():
         return []
     return sorted(p.name for p in RUNS.iterdir() if (p / "result.json").exists())
 
 
-def resolve_run(ref):
+def resolve_run(ref: str) -> str:
     """Accept a full run id, a unique substring, or 'latest[:build]'."""
     runs = list_runs()
     if ref.startswith("latest"):
@@ -290,14 +371,16 @@ def resolve_run(ref):
     matches = [r for r in runs if ref in r]
     if len(matches) == 1:
         return matches[0]
-    raise LabError(f"run '{ref}' is {'ambiguous' if matches else 'unknown'} (see `lab runs`)")
+    raise LabError(
+        f"run '{ref}' is {'ambiguous' if matches else 'unknown'} (see `lab runs`)"
+    )
 
 
-def load_run(run_id):
+def load_run(run_id: str) -> dict[str, Any]:
     return json.loads((RUNS / run_id / "result.json").read_text())
 
 
-def compare(refs, threshold=None):
+def compare(refs: Sequence[str], threshold: float | None = None) -> None:
     """Compare runs against the first (baseline). A change counts only if it exceeds
     both the threshold and 2x the combined coefficient of variation."""
     runs = [load_run(resolve_run(r)) for r in refs]
@@ -308,10 +391,16 @@ def compare(refs, threshold=None):
     print("runs:")
     for i, r in enumerate(runs):
         tag = "base" if i == 0 else f"#{i}"
-        print(f"  {tag:5} {r['id']}  [{r['describe']}  {r['profile']}  cfg {r['config_hash']}  "
-              f"guest {r['guest'].get('kernel_release', '?')}]")
+        print(
+            f"  {tag:5} {r['id']}  [{r['describe']}  {r['profile']}  "
+            f"cfg {r['config_hash']}  "
+            f"guest {r['guest'].get('kernel_release', '?')}]"
+        )
     if len({bool(r.get("telemetry")) for r in runs}) > 1:
-        warn("some runs had telemetry (eBPF probes) on and some off; that alone shifts results")
+        warn(
+            "some runs had telemetry (eBPF probes) on and some off; "
+            "that alone shifts results"
+        )
     if len({(r["vm"]["cpus"], r["vm"]["mem"]) for r in runs}) > 1:
         warn("runs used different VM sizes; comparison is apples to oranges")
     print()
@@ -319,7 +408,7 @@ def compare(refs, threshold=None):
     headers = ["metric", "base"]
     for i in range(1, len(runs)):
         headers += [f"#{i}", "delta", ""]
-    rows = []
+    rows: list[list[str]] = []
     for b, metrics in base["results"].items():
         for name, m in metrics.items():
             if not m["values"]:
@@ -332,7 +421,11 @@ def compare(refs, threshold=None):
                     row += ["-", "", ""]
                     continue
                 s1 = stats(other["values"])
-                delta = (s1["median"] - s0["median"]) / s0["median"] * 100 if s0["median"] else 0
+                delta = (
+                    (s1["median"] - s0["median"]) / s0["median"] * 100
+                    if s0["median"]
+                    else 0
+                )
                 noise = 2 * (s0["cv"] + s1["cv"])
                 limit = max(noise, threshold or 0)
                 if abs(delta) <= limit:
@@ -340,21 +433,34 @@ def compare(refs, threshold=None):
                 else:
                     good = (delta > 0) == (m["better"] == "higher")
                     verdict = "\033[32mbetter\033[0m" if good else "\033[31mworse\033[0m"
-                row += [f"{fmt(s1['median'])} ±{s1['cv']:.1f}%", f"{delta:+.1f}%", verdict]
+                row += [
+                    f"{fmt(s1['median'])} ±{s1['cv']:.1f}%",
+                    f"{delta:+.1f}%",
+                    verdict,
+                ]
             rows.append(row)
     print(table(rows, headers))
-    print("\n'~' = within noise (2x combined CV); rerun with more --repeat / --boots to tighten.")
+    print(
+        "\n'~' = within noise (2x combined CV); "
+        "rerun with more --repeat / --boots to tighten."
+    )
 
 
-def show_run(ref):
+def show_run(ref: str) -> None:
     r = load_run(resolve_run(ref))
-    print(f"{r['id']}  build={r['build']}  {r['describe']}  guest={r['guest'].get('kernel_release')}")
+    print(
+        f"{r['id']}  build={r['build']}  {r['describe']}  "
+        f"guest={r['guest'].get('kernel_release')}"
+    )
     print(f"vm={r['vm']}  params={r['params']}")
-    print(f"host: {r['host']['cpu']}  governor={r['host']['governor']}  load={r['host']['loadavg']}\n")
+    print(
+        f"host: {r['host']['cpu']}  governor={r['host']['governor']}  "
+        f"load={r['host']['loadavg']}\n"
+    )
     print(summary_table(r))
 
 
-def rm_run(ref):
+def rm_run(ref: str) -> None:
     run_id = resolve_run(ref)
     remove_tree(RUNS / run_id)
     info(f"{'would remove' if common.DRY else 'removed'} run {run_id}")
