@@ -2,8 +2,6 @@
   <img src="assets/logo.png" alt="klab logo" width="220">
 </p>
 
-<h1 align="center">klab</h1>
-
 <p align="center"><b>Linux kernel lab toolset</b></p>
 
 Fetch, build, boot and benchmark Linux kernels in QEMU, and compare builds.
