@@ -1,0 +1,18 @@
+#!/bin/sh
+# Booted with lab.job=1: wait for boot to settle, run /mnt/lab/job.sh, power off.
+# Lines starting with "@@lab " are markers parsed by the host (telemetry annotations).
+systemctl is-system-running --wait >/dev/null 2>&1
+mountpoint -q /mnt/lab || mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 lab /mnt/lab
+cd /mnt/lab || { echo "lab-runner: /mnt/lab not mounted"; poweroff -f; }
+if grep -qw lab.telemetry=1 /proc/cmdline; then
+    # Let the eBPF probes attach and the host start scraping before measuring.
+    for _ in $(seq 120); do [ -e /run/lab-ebpf/ready ] && break; sleep 0.5; done
+    sleep 3
+fi
+echo "lab-runner: starting job on $(uname -r)"
+echo "@@lab job-start"
+{ sh ./job.sh; echo $? > job.exit; } 2>&1 | tee job.log
+echo "@@lab job-end"
+sync
+echo "lab-runner: done, powering off"
+poweroff -f

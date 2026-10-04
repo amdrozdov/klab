@@ -1,0 +1,26 @@
+# ebpf_exporter example configs started on telemetry boots (/opt/ebpf_exporter/examples).
+# Each is checked first; ones that don't attach on the running kernel are skipped and
+# reported as lab_ebpf_config_loaded{config="..."} 0. Keep in sync with
+# monitoring/gen_dashboards.py (EBPF_CONFIGS) so every metric has a panel.
+syscalls
+timers
+percpu-softirq
+softirq-latency
+llcstat
+biolatency
+ext4dist
+cachestat
+shrinklat
+oomkill
+bpf-jit
+cfs-throttling
+cgroup-rstat-flushing
+unix-socket-backlog
+accept-latency
+tcp-syn-backlog
+tcp-retransmit
+tcp-window-clamps
+udp-drops
+kfree_skb
+inet-frags
+icmp-ip

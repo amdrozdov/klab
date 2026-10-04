@@ -1,0 +1,4 @@
+#!/bin/sh
+# In a VM a plain halt leaves qemu running with stopped CPUs; power off instead
+# so qemu exits. Takes the same flags as halt (-f, -p, --no-wall, ...).
+exec /usr/sbin/poweroff "$@"

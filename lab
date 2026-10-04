@@ -1,0 +1,4 @@
+#!/bin/sh
+# Entry point: ./lab <command> ...   (see ./lab --help). Runs via uv from any cwd.
+here=$(dirname "$(readlink -f "$0")")
+exec uv run --quiet --project "$here" lab "$@"

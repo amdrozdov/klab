@@ -1,0 +1,37 @@
+# --- lab data: kernel sources, builds, images, results (large, reproducible) ---
+/trees
+/builds
+/images
+/runs
+/shared/*
+!/shared/.keep
+/.lab/
+/monitoring/targets/*
+!/monitoring/targets/.keep
+
+# --- kernel / module build outputs that may land elsewhere (e.g. modules in shared/) ---
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.a
+*.order
+Module.symvers
+vmlinux*
+bzImage
+*.ext4
+*.qcow2
+*.img
+compile_commands.json
+.cache/
+
+# --- python / uv ---
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
+
+# --- personal notes, not published ---
+experiments/0_0_*

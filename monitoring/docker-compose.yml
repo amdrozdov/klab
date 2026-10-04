@@ -1,0 +1,98 @@
+# Telemetry stack for klab. Start with `make observe` (= ./lab observe up).
+# Everything uses host networking but binds to 127.0.0.1 only:
+#   Grafana          http://127.0.0.1:3000   (anonymous admin, local only)
+#   VictoriaMetrics  http://127.0.0.1:8428   (Prometheus-compatible TSDB + scraper)
+#   Tempo            127.0.0.1:3200 (query), 127.0.0.1:4318 (OTLP/HTTP in) — boot traces
+#   code-links       http://127.0.0.1:3001   (redirects trace links to vscode://file/...)
+#   node-exporter    127.0.0.1:9100          (host: CPU freq, load, ...)
+#   process-exporter 127.0.0.1:9256          (host: QEMU vCPU threads)
+# Guest exporters are reached through QEMU port forwards that `lab` registers in
+# ./targets/*.json while a VM runs (file-based service discovery).
+name: klab
+
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.153.0
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - -httpListenAddr=127.0.0.1:8428
+      - -storageDataPath=/storage
+      - -retentionPeriod=90d
+      - -promscrape.config=/etc/vm/scrape.yml
+      - -promscrape.fileSDCheckInterval=1s
+      - -search.latencyOffset=0s
+      - -search.cacheTimestampOffset=1s
+    volumes:
+      - vmdata:/storage
+      - ./victoriametrics/scrape.yml:/etc/vm/scrape.yml:ro
+      - ./targets:/etc/vm/targets:ro
+
+  tempo:
+    image: grafana/tempo:2.10.8
+    network_mode: host
+    restart: unless-stopped
+    user: root                      # writes to the named volume
+    stop_grace_period: 60s          # let it flush the WAL; a kill loses the newest block
+    command: [-config.file=/etc/tempo/tempo.yml]
+    volumes:
+      - tempo-data:/var/tempo
+      - ./tempo/tempo.yml:/etc/tempo/tempo.yml:ro
+
+  code-links:
+    image: nginx:1.29-alpine
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./code-links/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/lab-overview.json
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [victoriametrics, tempo]
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    network_mode: host
+    pid: host
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=127.0.0.1:9100
+    volumes:
+      - /:/host:ro,rslave
+
+  process-exporter:
+    image: ncabatoff/process-exporter:0.8.7
+    network_mode: host
+    pid: host
+    restart: unless-stopped
+    command:
+      - -procfs=/host/proc
+      - -config.path=/config/process-exporter.yml
+      - -threads=true
+      - -web.listen-address=127.0.0.1:9256
+    volumes:
+      - /proc:/host/proc:ro
+      - ./process-exporter/process-exporter.yml:/config/process-exporter.yml:ro
+
+volumes:
+  vmdata:
+  grafana-data:
+  tempo-data:

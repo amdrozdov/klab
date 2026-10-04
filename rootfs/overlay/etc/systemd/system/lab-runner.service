@@ -1,0 +1,13 @@
+[Unit]
+Description=klab benchmark job runner
+ConditionKernelCommandLine=lab.job=1
+After=mnt-lab.mount
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/lab-runner
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

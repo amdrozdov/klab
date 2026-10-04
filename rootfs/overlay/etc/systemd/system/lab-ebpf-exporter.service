@@ -1,0 +1,15 @@
+[Unit]
+Description=ebpf_exporter (klab telemetry)
+ConditionKernelCommandLine=lab.telemetry=1
+After=local-fs.target sys-kernel-tracing.mount
+
+[Service]
+# No OpenTelemetry collector here: don't try to export traces to localhost:4318.
+Environment=OTEL_TRACES_EXPORTER=none
+ExecStart=/usr/local/sbin/lab-ebpf-exporter
+Restart=on-failure
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

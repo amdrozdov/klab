@@ -1,0 +1,24 @@
+# Scrape config for VictoriaMetrics (Prometheus format).
+global:
+  scrape_interval: 1s
+  scrape_timeout: 1s
+
+scrape_configs:
+  # Guest exporters of running VMs; lab writes targets/<session>-{node,ebpf}.json
+  # with labels run=<run id>, build=<build>, kind=bench|boot.
+  - job_name: guest-node
+    file_sd_configs:
+      - files: [/etc/vm/targets/*-node.json]
+  - job_name: guest-ebpf
+    scrape_timeout: 900ms
+    file_sd_configs:
+      - files: [/etc/vm/targets/*-ebpf.json]
+
+  # Host side: is the host itself a source of noise?
+  - job_name: host-node
+    scrape_interval: 2s
+    static_configs:
+      - targets: [127.0.0.1:9100]
+  - job_name: host-qemu
+    static_configs:
+      - targets: [127.0.0.1:9256]

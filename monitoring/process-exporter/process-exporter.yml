@@ -1,0 +1,8 @@
+# Group QEMU processes by VM name (`-name guest=lab-<build>,debug-threads=on`),
+# so per-thread metrics show vCPU threads as "CPU 0/KVM", "CPU 1/KVM", ...
+process_names:
+  - name: "{{.Matches.vm}}"
+    comm: [qemu-system-x86]
+    cmdline: ['guest=(?P<vm>[^,]+)']
+  - name: "{{.Comm}}"
+    comm: [qemu-system-x86]

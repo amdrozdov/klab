@@ -1,0 +1,64 @@
+#!/bin/sh
+# Start ebpf_exporter with every config from /etc/klab/ebpf-configs that attaches
+# on this kernel. Per-config status goes to the node_exporter textfile collector
+# (lab_ebpf_config_loaded) so the dashboard shows what is and isn't available.
+set -u
+bin=/opt/ebpf_exporter/ebpf_exporter
+dir=/opt/ebpf_exporter/examples
+textfile=/var/lib/prometheus/node-exporter/lab_ebpf.prom
+st=/run/lab-ebpf
+rm -rf $st && mkdir -p $st
+configs=$(grep -v '^#' /etc/klab/ebpf-configs)
+
+btf=0
+[ -e /sys/kernel/btf/vmlinux ] && btf=1
+if [ $btf = 1 ]; then
+    for c in $configs; do   # check in parallel; each loads + attaches its programs
+        ( timeout 60 $bin --config.dir=$dir --config.names=$c --config.check \
+              > $st/$c.log 2>&1 && touch $st/$c.ok ) &
+    done
+    wait
+else
+    echo "lab-ebpf: kernel has no BTF (CONFIG_DEBUG_INFO_BTF); eBPF metrics disabled"
+fi
+
+# Configs that need hardware perf counters; KVM guests on some hosts (e.g. hybrid
+# P/E-core Intel CPUs) get no virtual PMU and these attach but never fire.
+needs_pmu="llcstat"
+has_pmu=0
+ls -d /sys/bus/event_source/devices/cpu* >/dev/null 2>&1 && has_pmu=1
+
+ok=""
+{
+    echo "# HELP lab_ebpf_btf_available Kernel exposes BTF (/sys/kernel/btf/vmlinux)."
+    echo "# TYPE lab_ebpf_btf_available gauge"
+    echo "lab_ebpf_btf_available $btf"
+    echo "# HELP lab_ebpf_config_loaded ebpf_exporter config attached on this kernel (1) or not (0)."
+    echo "# TYPE lab_ebpf_config_loaded gauge"
+    for c in $configs; do
+        reason=""
+        if [ $btf = 0 ]; then
+            reason="kernel has no BTF"
+        elif [ ! -e $st/$c.ok ]; then
+            # Last libbpf/exporter error line, e.g. "failed to load BPF object: no such process".
+            reason=$(tail -n1 $st/$c.log | sed 's/.*: \(failed to [^"]*\)$/\1/; s/^[0-9/]* [0-9:]* //' \
+                     | tr -d '"\\' | cut -c1-120)
+        elif [ $has_pmu = 0 ] && echo " $needs_pmu " | grep -q " $c "; then
+            reason="no hardware PMU in the guest"
+        fi
+        if [ -z "$reason" ]; then
+            ok="$ok,$c"; v=1
+        else
+            v=0; echo "lab-ebpf: skip $c: $reason" >&2
+        fi
+        echo "lab_ebpf_config_loaded{config=\"$c\",reason=\"$reason\"} $v"
+    done
+} > $textfile.tmp && mv $textfile.tmp $textfile
+ok=${ok#,}
+
+touch $st/ready            # lab-runner waits for this before starting benchmarks
+if [ -z "$ok" ]; then
+    exec sleep infinity     # nothing to export; stay up without a restart loop
+fi
+echo "lab-ebpf: exporting $ok"
+exec $bin --config.dir=$dir --config.names=$ok --web.listen-address=:9435

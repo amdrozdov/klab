@@ -1,0 +1,35 @@
+# Tempo (single binary, local storage) for boot traces from `lab boottrace`.
+# OTLP/HTTP in on 127.0.0.1:4318, query API for Grafana on 127.0.0.1:3200.
+stream_over_http_enabled: true
+
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: 3200
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 9095
+  log_level: warn
+
+memberlist:
+  bind_addr: [127.0.0.1]
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 127.0.0.1:4318
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 2160h      # 90 days, like VictoriaMetrics
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks

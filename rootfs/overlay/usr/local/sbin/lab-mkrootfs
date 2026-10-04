@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs inside docker (as root): unpack the exported container tar from stdin
+# and turn it into an ext4 image. Usage: lab-mkrootfs <out.ext4> <size> <uid> <gid>
+set -e
+out=$1 size=$2 uid=$3 gid=$4
+root=/tmp/rootfs
+mkdir -p $root
+tar -C $root -xpf -
+rm -f $root/.dockerenv
+echo klab > $root/etc/hostname
+printf '127.0.0.1 localhost\n127.0.1.1 klab\n' > $root/etc/hosts
+echo 'nameserver 10.0.2.3' > $root/etc/resolv.conf
+rm -f "$out"
+mkfs.ext4 -q -F -L rootfs -d $root "$out" "$size"
+chown "$uid:$gid" "$out"

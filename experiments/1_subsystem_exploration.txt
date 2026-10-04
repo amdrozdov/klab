@@ -1,0 +1,36 @@
+fs/pipe.c ~1600 lines of code (v7.2.8)
+
++1. Read the code path, in this order:
+
+do_pipe2 → create_pipe_files (how two struct files end up sharing one pipe_inode_info);
+anon_pipe_write (fs/pipe.c:523): merging into the last buffer, allocating pages, sleeping when full;
+anon_pipe_read (fs/pipe.c:361);
+pipe_set_size (fs/pipe.c:1461), the F_SETPIPE_SZ path, plus the fs.pipe-max-size sysctl.
+
+
++2. Watch it run. Run ./lab boot, then inside the guest :
+```
+dd if=/dev/zero bs=64k count=2000 | cat > /dev/null &
+bpftrace -e 'kprobe:anon_pipe_write { @[comm] = count(); } kretprobe:anon_pipe_read { @bytes = hist(retval); }'
+trace-cmd record -p function_graph -g anon_pipe_write -- sh -c 'echo hi | cat'; trace-cmd report | less
+```
+
+function_graph shows the call tree under each write: page allocation, copying from userspace,
+the wakeup.
+
++3. First experiment: buffer count. Make a variant, change PIPE_DEF_BUFFERS from 16 to 2, and compare (fs/pipe.c:893):
+
+./lab tree new pipe-small --from v7.2.8      # edit trees/pipe-small/include/linux/pipe_fs_i.h
+./lab build pipe-small
+./lab bench run syscall stress-ng -b v7.2.8-perf      --no-telemetry -r 5
+./lab bench run syscall stress-ng -b pipe-small-perf  --no-telemetry -r 5
+./lab compare latest:v7.2.8-perf latest:pipe-small-perf
+Then run it again with make observe up and look at context switches and run-queue wait in Grafana.
+ A smaller ring means the writer blocks far more often.
+
+ x2 degradation confirmed (width of context switch peak increased x2)
+
+Next subsystem:
+1. queues/scheduler
+2. fs/splice.c
+3. Unix sockets net/unix (maybe later)

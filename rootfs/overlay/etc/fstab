@@ -1,0 +1,3 @@
+# 9p shares provided by qemu (see labtool/vm.py). nofail: boot even if absent.
+lab   /mnt/lab      9p  trans=virtio,version=9p2000.L,msize=262144,nofail  0 0
+mods  /lib/modules  9p  trans=virtio,version=9p2000.L,ro,nofail           0 0

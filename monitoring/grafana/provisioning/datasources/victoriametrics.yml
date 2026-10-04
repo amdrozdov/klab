@@ -1,0 +1,19 @@
+apiVersion: 1
+datasources:
+  - name: VictoriaMetrics
+    uid: victoriametrics
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:8428
+    isDefault: true
+    jsonData:
+      timeInterval: 1s
+      prometheusType: Prometheus
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://127.0.0.1:3200
+    jsonData:
+      nodeGraph:
+        enabled: true
