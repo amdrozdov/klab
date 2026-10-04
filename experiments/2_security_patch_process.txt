@@ -6,7 +6,7 @@ Goal
 Learn the workflow kernel maintainers use for security fixes:
 find an official fix -> decide whether an older kernel is affected -> port the patch
 (resolving conflicts by hand) -> validate that the port is correct and introduces no
-regressions. The target is your v6.9.12 tree: 6.9 reached end of life at 6.9.12, so fixes
+regressions. The target is your v6.8.12 tree: 6.8 reached end of life at 6.8.12, so fixes
 merged after that were never backported to it. Porting one yourself is a realistic job.
 
 Validation in this experiment is about the *fix* (review, builds, debug kernels, regression
@@ -45,8 +45,8 @@ Browse vulns.git (cve/published/2025/ and 2026/) and choose one CVE whose record
 
   [ ] the fix touches a subsystem you have read: fs/pipe.c, fs/splice.c, fs/*.c helpers,
       or something small and self-contained (one or two files, under ~50 changed lines)
-  [ ] the affected range includes 6.9 (introducing commit is older than v6.9, or the
-      record lists 6.9 as affected), and there is NO fix listed for 6.9.y
+  [ ] the affected range includes 6.8 (introducing commit is older than v6.8, or the
+      record lists 6.8 as affected), and there is NO fix listed for 6.8.y
   [ ] a backport exists for an even older LTS branch (6.6.y or 6.1.y). That backport is
       your reference answer at the end; don't look at it until step 6.
   [ ] bonus: the fix adds or changes a selftest under tools/testing/selftests/
@@ -62,15 +62,15 @@ Tip: the record's .json "programFiles" / "affected" sections tell you the files 
 version ranges without cloning anything.
 
 
-Step 2. Confirm v6.9.12 is affected
+Step 2. Confirm v6.8.12 is affected
 -----------------------------------
 Your trees are shallow clones (no history), so check the code instead of `git log`:
 
   - Open the upstream fix (cgit, plain patch):
       https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/patch/?id=<fix sha>
-  - For every hunk, find the "-" lines (pre-image) in trees/v6.9.12/<file>.
-    If the buggy code is present (possibly slightly different), 6.9.12 is affected.
-  - Open the "Fixes:" commit the same way and confirm its change is in 6.9.12.
+  - For every hunk, find the "-" lines (pre-image) in trees/v6.8.12/<file>.
+    If the buggy code is present (possibly slightly different), 6.8.12 is affected.
+  - Open the "Fixes:" commit the same way and confirm its change is in 6.8.12.
   - Compare with trees/v7.2.8/<file>: the fix must already be there (7.2.8 is newer).
 
   Result: affected? yes / no   evidence (file:line):
@@ -83,16 +83,16 @@ Step 3. Get the patch and try a clean apply
       "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/patch/?id=<fix sha>"
 
   # variant of the old kernel with the fix applied (git am --3way under the hood)
-  ./lab tree new v6.9.12-fix --from v6.9.12 --patch experiments/2_security/upstream.patch
+  ./lab tree new v6.8.12-fix --from v6.8.12 --patch experiments/2_security/upstream.patch
 
 Case A, it applies cleanly: continue with step 5, then still do step 4's review checklist.
 That a patch applies is not proof it is correct for an older kernel.
 
 Case B, conflicts (the interesting case): `lab` stops with an error. Do it by hand:
 
-  git -C trees/v6.9.12-fix am --abort 2>/dev/null
-  git -C trees/v6.9.12-fix apply --reject --whitespace=fix ../../experiments/2_security/upstream.patch
-  find trees/v6.9.12-fix -name '*.rej'        # hunks that did not apply
+  git -C trees/v6.8.12-fix am --abort 2>/dev/null
+  git -C trees/v6.8.12-fix apply --reject --whitespace=fix ../../experiments/2_security/upstream.patch
+  find trees/v6.8.12-fix -name '*.rej'        # hunks that did not apply
 
 
 Step 4. Port the rejected hunks
@@ -100,10 +100,10 @@ Step 4. Port the rejected hunks
 For each .rej file, compare three versions of the code side by side:
   upstream before the fix  (the "-" lines in the patch)
   upstream after the fix   (the "+" lines)
-  v6.9.12                  (trees/v6.9.12-fix/<file>)
+  v6.8.12                  (trees/v6.8.12-fix/<file>)
 
 Typical reasons a hunk fails on an older kernel (you already met the first one:
-6.9 has pipe_read/pipe_write where 7.2 has anon_pipe_read/anon_pipe_write):
+6.8 has pipe_read/pipe_write where 7.2 has anon_pipe_read/anon_pipe_write):
   - functions or helpers renamed, split or not yet introduced
   - surrounding code changed (context lines differ), only the position moved
   - the fix relies on a helper added later: backport the helper too, or open-code it
@@ -117,8 +117,8 @@ Rules while porting:
 
 Commit in stable-backport style:
 
-  git -C trees/v6.9.12-fix add -A
-  git -C trees/v6.9.12-fix commit
+  git -C trees/v6.8.12-fix add -A
+  git -C trees/v6.8.12-fix commit
   ----
   <original subject line>
 
@@ -126,36 +126,36 @@ Commit in stable-backport style:
 
   <original commit message body, incl. Fixes: and Cc: tags>
 
-  [ <your name>: adjusted for v6.9: <what you changed and why, one or two lines> ]
+  [ <your name>: adjusted for v6.8: <what you changed and why, one or two lines> ]
   Signed-off-by: <you>
   ----
 
-  rm -f $(find trees/v6.9.12-fix -name '*.rej' -o -name '*.orig')
-  ./lab tree show v6.9.12-fix                # your commit on top of v6.9.12
+  rm -f $(find trees/v6.8.12-fix -name '*.rej' -o -name '*.orig')
+  ./lab tree show v6.8.12-fix                # your commit on top of v6.8.12
 
 Review checklist (answer each in writing):
   [ ] Every "-"/"+" hunk of the upstream fix is accounted for (applied, adapted, or
-      explained as not applicable to 6.9)
-  [ ] Locking: any lock taken/released by the fix exists in 6.9 with the same rules
+      explained as not applicable to 6.8)
+  [ ] Locking: any lock taken/released by the fix exists in 6.8 with the same rules
   [ ] Error paths: every new early return/goto releases what was acquired
-  [ ] Types and helpers used by the fix exist in 6.9 with the same semantics
+  [ ] Types and helpers used by the fix exist in 6.8 with the same semantics
   [ ] No behaviour change outside the bug (diff your result vs upstream fix: only
       adaptation differences remain)
-        git -C trees/v6.9.12-fix show HEAD > experiments/2_security/backport.patch
+        git -C trees/v6.8.12-fix show HEAD > experiments/2_security/backport.patch
         diff <(grep '^[-+][^-+]' experiments/2_security/upstream.patch) \
              <(grep '^[-+][^-+]' experiments/2_security/backport.patch)
 
 
 Step 5. Build and static checks
 -------------------------------
-  ./lab build v6.9.12-fix                         # perf profile (BTF, no debug checkers)
-  ./lab diffconfig v6.9.12-perf v6.9.12-fix-perf  # must print nothing: same config
+  ./lab build v6.8.12-fix                         # perf profile (BTF, no debug checkers)
+  ./lab diffconfig v6.8.12-perf v6.8.12-fix-perf  # must print nothing: same config
 
   # style/obvious-mistake check on your commit
-  (cd trees/v6.9.12-fix && scripts/checkpatch.pl -g HEAD)
+  (cd trees/v6.8.12-fix && scripts/checkpatch.pl -g HEAD)
 
   # rebuild only the touched file with extra warnings (replace path)
-  make -C trees/v6.9.12-fix O=$PWD/builds/v6.9.12-fix-perf W=1 fs/<file>.o
+  make -C trees/v6.8.12-fix O=$PWD/builds/v6.8.12-fix-perf W=1 fs/<file>.o
 
   Expected: build succeeds, no new warnings in the touched files, identical config.
 
@@ -163,25 +163,25 @@ Step 5. Build and static checks
 Step 6. Validate the port
 -------------------------
 6a. Boots cleanly, no new kernel messages
-    ./lab boottrace v6.9.12-perf
-    ./lab boottrace v6.9.12-fix-perf
-    diff <(sed 's/^\[[ 0-9.]*\] //' runs/*v6.9.12-perf-boottrace/boot0/dmesg.txt | sort -u) \
-         <(sed 's/^\[[ 0-9.]*\] //' runs/*v6.9.12-fix-perf-boottrace/boot0/dmesg.txt | sort -u)
+    ./lab boottrace v6.8.12-perf
+    ./lab boottrace v6.8.12-fix-perf
+    diff <(sed 's/^\[[ 0-9.]*\] //' runs/*v6.8.12-perf-boottrace/boot0/dmesg.txt | sort -u) \
+         <(sed 's/^\[[ 0-9.]*\] //' runs/*v6.8.12-fix-perf-boottrace/boot0/dmesg.txt | sort -u)
     Expected: only timing/address noise, no WARN/BUG/oops lines.
 
 6b. The patched code actually runs
-    ./lab boot v6.9.12-fix-perf
+    ./lab boot v6.8.12-fix-perf
     # in the guest: count calls of the function(s) your patch changed while you run
     # normal workloads that use that subsystem (for pipes: dd | cat, stress-ng --pipe)
-    bpftrace -l 'kprobe:<function>'               # exists under this name in 6.9?
+    bpftrace -l 'kprobe:<function>'               # exists under this name in 6.8?
     bpftrace -e 'kprobe:<function> { @[comm] = count(); }'
     Expected: non-zero counts, so the tests below exercise your change.
 
 6c. Debug kernel: memory and locking checkers
     Patches that touch error paths or locking are where backports go wrong. Build the
     variant with KASAN (memory errors) and lockdep (lock ordering) and exercise it:
-      ./lab build v6.9.12-fix -p debug             # -> v6.9.12-fix-debug (slow, big)
-      ./lab boot v6.9.12-fix-debug
+      ./lab build v6.8.12-fix -p debug             # -> v6.8.12-fix-debug (slow, big)
+      ./lab boot v6.8.12-fix-debug
       # in the guest: run the subsystem's workloads and selftests (6d), then
       dmesg | grep -iE "kasan|lockdep|possible circular|BUG:|WARNING:"
     Expected: nothing.
@@ -191,16 +191,16 @@ Step 6. Validate the port
       make -C trees/v6.8.12-fix/tools/testing/selftests TARGETS=filesystems install INSTALL_PATH=$PWD/shared/selftests
       # if the upstream fix added/changed a selftest: port it into the variant too
       # and build it the same way
-    In the guest (./lab boot v6.9.12-fix-debug):
+    In the guest (./lab boot v6.8.12-fix-debug):
       cd /mnt/lab/selftests && ./run_kselftest.sh   # or run the test binaries directly
-    Run the same tests on v6.9.12-debug (unpatched) and compare:
+    Run the same tests on v6.8.12-debug (unpatched) and compare:
       Expected: no test that passed before fails now; a test added by the fix should
       pass on the patched kernel.
 
 6e. No performance regression
-    ./lab bench run syscall stress-ng hackbench -b v6.9.12-perf     --no-telemetry -r 5
-    ./lab bench run syscall stress-ng hackbench -b v6.9.12-fix-perf --no-telemetry -r 5
-    ./lab compare latest:v6.9.12-perf latest:v6.9.12-fix-perf
+    ./lab bench run syscall stress-ng hackbench -b v6.8.12-perf     --no-telemetry -r 5
+    ./lab bench run syscall stress-ng hackbench -b v6.8.12-fix-perf --no-telemetry -r 5
+    ./lab compare latest:v6.8.12-perf latest:v6.8.12-fix-perf
     Expected: everything "~" (within noise). If a fix adds a check on a hot path, a small
     cost can be legitimate: explain it instead of hiding it.
 
@@ -213,7 +213,7 @@ Step 6. Validate the port
 
 Step 7. Write-up (experiments/2_security/NOTES.txt)
 ---------------------------------------------------
-  - CVE, upstream fix, Fixes: commit, why 6.9.12 is affected (file:line evidence)
+  - CVE, upstream fix, Fixes: commit, why 6.8.12 is affected (file:line evidence)
   - one-sentence intent of the fix
   - conflicts you hit and how you resolved each (and why that is safe)
   - validation table:
@@ -225,7 +225,7 @@ Step 7. Write-up (experiments/2_security/NOTES.txt)
         selftests before/after (6d)    |
         benchmarks (6e)                |
         diff vs reference backport (6f)|
-  - what you would send upstream (stable@vger.kernel.org) if 6.9 were still maintained
+  - what you would send upstream (stable@vger.kernel.org) if 6.8 were still maintained
 
 
 Files this experiment creates
@@ -234,5 +234,5 @@ Files this experiment creates
   experiments/2_security/backport.patch        your port (git show HEAD)
   experiments/2_security/reference-6.6.patch   maintainers' backport, for comparison
   experiments/2_security/NOTES.txt             write-up
-  trees/v6.9.12-fix, builds/v6.9.12-fix-{perf,debug}, runs/*v6.9.12-fix*
+  trees/v6.8.12-fix, builds/v6.8.12-fix-{perf,debug}, runs/*v6.8.12-fix*
 
