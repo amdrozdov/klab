@@ -8,6 +8,8 @@
 /.lab/
 /monitoring/targets/*
 !/monitoring/targets/.keep
+# downloaded / decompressed base configs (lab build --base-config)
+/configs/.cache/
 
 # --- kernel / module build outputs that may land elsewhere (e.g. modules in shared/) ---
 *.o

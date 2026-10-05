@@ -1,0 +1,81 @@
+Boot the final full-config kernel in QEMU against a real distro (Stage 2)
+
+Goal: before touching real hardware, run the kernel you'd actually ship on a real
+distro userspace (Ubuntu / Arch) inside QEMU. This is the Stage-2 gate: it validates
+the full distro init path (systemd, udev, modules, networking) and the generic
+virtio/DRM stack on your kernel. It does NOT validate your laptop's real GPU/NVMe/
+firmware/suspend -- that stays the job of the hardware canary (Gate 2).
+
+Which build to boot:
+- Use the non-raw full-config build, so virtio-blk / ext4 / virtio-net are built in and
+  the kernel can mount a distro root with no initramfs:
+      ./lab build v6.8.12 --base-config host --no-debug-info
+- Do NOT use the --raw build here: it has no lab-vm overlay, so virtio/ext4 may be
+  modules, and it would need the distro's own initramfs (built for a different kernel).
+  --raw is the artifact you package for real hardware, not for this VM test.
+
+The pieces:
+```
+KERNEL=builds/v6.8.12-host/arch/x86/boot/bzImage
+MODROOT=builds/v6.8.12-host/modroot
+REL=$(cat builds/v6.8.12-host/include/config/kernel.release)   # e.g. 6.8.12
+```
+
+
+1. Get a distro disk image + a way to log in.
+
+Cloud images have no password; set one with libguestfs-tools
+(sudo apt install libguestfs-tools):
+```
+wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img -O ubuntu.qcow2
+sudo virt-customize -a ubuntu.qcow2 --root-password password:lab
+```
+Arch's cloud image works the same way.
+
+
+2. Put your kernel's modules into the image.
+
+The image ships modules for its own kernel, not yours. Built-in virtio/ext4 get you to a
+login, but copy your modroot in so the rest of the drivers are present:
+```
+sudo virt-copy-in -a ubuntu.qcow2 "$MODROOT/lib/modules/$REL" /lib/modules/
+```
+
+
+3. Boot headless (serial) -- the fast validation.
+```
+qemu-system-x86_64 -enable-kvm -cpu host -m 4G -smp 4 -nographic \
+  -kernel "$KERNEL" \
+  -append "root=/dev/vda1 ro console=ttyS0 net.ifnames=0" \
+  -drive file=ubuntu.qcow2,if=virtio,format=qcow2,snapshot=on \
+  -nic user,model=virtio-net-pci
+```
+- snapshot=on: guest writes are discarded on exit, so you can rerun from a clean image.
+- root=/dev/vda1: name the device directly. Do NOT use root=LABEL=... or root=UUID=... --
+  filesystem label/UUID lookup is done by udev inside an initramfs, and we boot with no
+  initramfs, so the in-kernel root mounter only understands root=/dev/..., root=PARTUUID=...
+  or major:minor. LABEL= panics with "Cannot open root device ... error -6".
+  On the Ubuntu noble cloud image root is vda1 (vda15 = EFI vfat, vda16 = /boot). Confirm
+  the layout with: virt-filesystems -a ubuntu.qcow2 -l  (or read the panic's partition list).
+  PARTUUID also works with no initramfs, e.g. root=PARTUUID=<the uuid shown next to vda1>.
+- Log in root / lab on the serial console; `uname -r` confirms your kernel. systemctl,
+  dmesg and networking exercise the real userspace. Quit with Ctrl-A X.
+
+
+4. Boot graphical (virtio-GPU window).
+
+Add a GPU + display and let the kernel use the graphical console too:
+```
+qemu-system-x86_64 -enable-kvm -cpu host -m 4G -smp 4 \
+  -kernel "$KERNEL" \
+  -append "root=/dev/vda1 ro console=tty0 console=ttyS0 net.ifnames=0" \
+  -drive file=ubuntu.qcow2,if=virtio,format=qcow2,snapshot=on \
+  -device virtio-gpu-pci -display gtk \
+  -device qemu-xhci -device usb-kbd -device usb-tablet \
+  -nic user,model=virtio-net-pci
+```
+This exercises the DRM/KMS path on a framebuffer console. The Ubuntu CLOUD image is a
+headless server, so you get a graphical TTY, not a desktop. For an actual desktop session
+use a desktop image, or `apt install ubuntu-desktop-minimal` in a snapshot=off image, or
+install the kernel's .deb packages into a normal graphical VM (VMware/VirtualBox/Boxes).
+

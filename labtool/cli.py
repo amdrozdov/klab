@@ -49,7 +49,13 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     )
     check(have("pahole"), "pahole (BTF for eBPF)", "sudo apt install dwarves")
     print("optional:")
-    for t, why in (("ccache", "much faster rebuilds"),):
+    for t, why in (
+        ("ccache", "much faster rebuilds"),
+        (
+            "virt-customize",
+            "boot a build against a distro image: apt install libguestfs-tools",
+        ),
+    ):
         mark = "\033[32mok\033[0m  " if have(t) else "\033[33mmissing\033[0m"
         print(f"  {mark} {t}  ({why})")
     print("vm:")
@@ -272,6 +278,9 @@ def cmd_build(a: argparse.Namespace) -> None:
         a.reconfig,
         a.menuconfig,
         a.config_only,
+        base_config=a.base_config,
+        raw=a.raw,
+        no_debug_info=a.no_debug_info,
     )
 
 
@@ -504,6 +513,26 @@ def parser() -> argparse.ArgumentParser:
     )
     s.add_argument("-n", "--name", help="build name (default: <tree>-<profile>)")
     s.add_argument("-j", "--jobs", type=int)
+    s.add_argument(
+        "-c",
+        "--base-config",
+        default="defconfig",
+        metavar="SOURCE",
+        help="start from a full config instead of defconfig+kvm_guest: "
+        "host | arch | <path> | <url>  (host = /boot/config-$(uname -r))",
+    )
+    s.add_argument(
+        "--raw",
+        action="store_true",
+        help="with --base-config: don't add the lab VM-boot overlay "
+        "(exact ship config; may not boot the lab VM)",
+    )
+    s.add_argument(
+        "--no-debug-info",
+        action="store_true",
+        help="disable DWARF/BTF debug info (~halves build size; drops "
+        "source-level gdb and BTF-based eBPF)",
+    )
     s.add_argument(
         "--reconfig", action="store_true", help="regenerate .config from scratch"
     )

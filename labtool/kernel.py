@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
 import re
 import subprocess
 import urllib.request
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,32 @@ STABLE_GIT = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
 
 # Applied on top of `make defconfig kvm_guest.config`, in this order.
 BASE_FRAGMENT = "base"
+
+# Merged on top of a --base-config full config (unless --raw) so the resulting
+# kernel still boots the lab's QEMU VM: virtio devices, ext4 root, 9p shares.
+LAB_VM_FRAGMENT = "lab-vm"
+
+# Also merged for --base-config (unless --raw): clears distro-only signing/trusted-key
+# paths that break a vanilla kernel.org build at the certs step.
+DISTRO_FIXUP_FRAGMENT = "no-distro-keys"
+
+# Merged last for `--no-debug-info`: disables DWARF/BTF to shrink the build.
+NO_DEBUGINFO_FRAGMENT = "no-debuginfo"
+
+# Downloaded / decompressed base configs are cached here (gitignored).
+CONFIG_CACHE = CONFIGS / ".cache"
+
+# Public full-config sources for `--base-config <name>`: name -> (version, arch)
+# -> URL of a single complete .config. Ubuntu is intentionally absent — it has no
+# single downloadable per-version config; use `--base-config host` for it.
+KNOWN_CONFIGS: dict[str, Callable[[str, str], str]] = {
+    # Arch Linux ships one full x86_64 config tracking its latest packaged kernel;
+    # `make olddefconfig` then adapts it to the target tree.
+    "arch": lambda version, arch: (
+        "https://gitlab.archlinux.org/archlinux/packaging/packages/linux/"
+        "-/raw/main/config"
+    ),
+}
 
 
 # --------------------------------------------------------------------------- fetch
@@ -430,6 +457,91 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _safe_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return b""
+
+
+# --------------------------------------------------------------------------- base configs
+
+
+def _is_gzip(path: Path) -> bool:
+    if path.suffix == ".gz":
+        return True
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
+def _gunzip(src: Path, dest: Path) -> Path:
+    if common.DRY:
+        print(f"gunzip -c {src} > {dest}", flush=True)
+        return dest
+    dest.write_bytes(gzip.decompress(src.read_bytes()))
+    return dest
+
+
+def _fetch(url: str, dest: Path) -> Path:
+    """Download a .config (gunzipping if the server sent gzip) into the cache."""
+    show(["curl", "-fsSL", "-o", dest, url])
+    if common.DRY:
+        return dest
+    info(f"downloading kernel config from {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = r.read()
+    except OSError as e:
+        raise LabError(f"could not download base config from {url}: {e}") from e
+    if data[:2] == b"\x1f\x8b":
+        data = gzip.decompress(data)
+    dest.write_bytes(data)
+    return dest
+
+
+def resolve_base_config(source: str, version: str, arch: str) -> Path:
+    """Resolve a --base-config SOURCE to a local full .config.
+
+    SOURCE is 'host' (the running kernel's config), a known distro name
+    (see KNOWN_CONFIGS), a URL, or a local path (optionally gzipped)."""
+    if not common.DRY:
+        CONFIG_CACHE.mkdir(parents=True, exist_ok=True)
+
+    if source == "host":
+        plain = Path(f"/boot/config-{os.uname().release}")
+        if plain.exists():
+            return plain
+        gz = Path("/proc/config.gz")
+        if gz.exists():
+            return _gunzip(gz, CONFIG_CACHE / "host.config")
+        dry_or_raise(
+            f"no host config: neither {plain} nor /proc/config.gz exists "
+            "(pass a path or URL to --base-config instead)"
+        )
+        return plain
+
+    if source in KNOWN_CONFIGS:
+        url = KNOWN_CONFIGS[source](version, arch)
+        return _fetch(url, CONFIG_CACHE / f"{source}-{version}.config")
+
+    if source.startswith(("http://", "https://")):
+        name = (source.rsplit("/", 1)[-1] or "download").removesuffix(".gz")
+        if not name.endswith(".config"):
+            name += ".config"
+        return _fetch(source, CONFIG_CACHE / name)
+
+    p = Path(source)
+    if not p.exists():
+        dry_or_raise(f"base config not found: {source}")
+        return p
+    if _is_gzip(p):
+        return _gunzip(p, CONFIG_CACHE / f"{p.stem}.config")
+    return p.resolve()
+
+
 def build(
     tree: str | None = None,
     profile: str = "perf",
@@ -439,20 +551,47 @@ def build(
     reconfig: bool = False,
     menuconfig: bool = False,
     olddefconfig_only: bool = False,
+    base_config: str = "defconfig",
+    raw: bool = False,
+    no_debug_info: bool = False,
 ) -> str:
     tree = default_tree(tree)
     src = tree_path(tree)
-    name = name or f"{tree}-{profile}"
+    full = base_config != "defconfig"
+    if name is None:
+        if not full:
+            name = f"{tree}-{profile}"
+        elif base_config == "host" or base_config in KNOWN_CONFIGS:
+            name = f"{tree}-{base_config}"
+        else:
+            name = f"{tree}-custom"
     out = build_dir(name)
     jobs = jobs or os.cpu_count()
 
     # Validate profile/fragments first, so a typo doesn't leave an empty build dir.
-    frag_paths = [fragment_path(BASE_FRAGMENT), fragment_path(profile)]
+    # defconfig: build up from defconfig + kvm_guest + base fragment + profile.
+    # full base config: start from it, overlay the VM-boot essentials (unless --raw)
+    # and the profile; the kvm_guest/base fragments are NOT forced on.
+    base_cfg = resolve_base_config(base_config, tree, "x86_64") if full else None
+    if not full:
+        frag_paths = [fragment_path(BASE_FRAGMENT), fragment_path(profile)]
+    elif raw:
+        frag_paths = []
+    else:
+        frag_paths = [
+            fragment_path(LAB_VM_FRAGMENT),
+            fragment_path(DISTRO_FIXUP_FRAGMENT),
+            fragment_path(profile),
+        ]
     frag_paths += [fragment_path(f) for f in fragments]
+    # Applied last so it overrides debug-info settings from the base config / profile.
+    if no_debug_info:
+        frag_paths.append(fragment_path(NO_DEBUGINFO_FRAGMENT))
     if not common.DRY:
         out.mkdir(parents=True, exist_ok=True)
+    hash_srcs = ([base_cfg] if base_cfg else []) + frag_paths
     inputs_hash = hashlib.sha256(
-        b"".join(p.read_bytes() for p in frag_paths)
+        b"".join(_safe_bytes(p) for p in hash_srcs)
     ).hexdigest()[:12]
 
     meta = build_meta(name)
@@ -470,23 +609,31 @@ def build(
         or not (out / ".config").exists()
         or meta.get("fragments_hash") != inputs_hash
     ):
-        info(
-            f"configuring {name}: defconfig + kvm_guest + "
-            f"{', '.join(p.stem for p in frag_paths)}"
-        )
-        run([*make, "defconfig"])
-        run([*make, "kvm_guest.config"])
-        run(
-            [
-                src / "scripts/kconfig/merge_config.sh",
-                "-m",
-                "-O",
-                out,
-                out / ".config",
-                *frag_paths,
-            ],
-            cwd=src,
-        )
+        overlay = ", ".join(p.stem for p in frag_paths)
+        if base_cfg is None:
+            info(f"configuring {name}: defconfig + kvm_guest + {overlay}")
+            run([*make, "defconfig"])
+            run([*make, "kvm_guest.config"])
+        else:
+            info(
+                f"configuring {name}: base config '{base_config}'"
+                + (f" + {overlay}" if overlay else " (raw)")
+            )
+            run(["cp", base_cfg, out / ".config"])
+            # Adapt the (possibly different-version) config to this tree first.
+            run([*make, "olddefconfig"])
+        if frag_paths:
+            run(
+                [
+                    src / "scripts/kconfig/merge_config.sh",
+                    "-m",
+                    "-O",
+                    out,
+                    out / ".config",
+                    *frag_paths,
+                ],
+                cwd=src,
+            )
         run([*make, "olddefconfig"])
         if not common.DRY:
             verify_config(out, frag_paths)
@@ -501,6 +648,13 @@ def build(
         ],
         "fragments_hash": inputs_hash,
     }
+    if base_cfg is not None:
+        meta["base_config"] = {
+            "source": base_config,
+            "path": str(base_cfg),
+            "sha256": hashlib.sha256(_safe_bytes(base_cfg)).hexdigest(),
+            "raw": raw,
+        }
     if not common.DRY:
         (out / "lab-build.json").write_text(
             json.dumps({**build_meta(name), **meta}, indent=2) + "\n"
@@ -518,7 +672,10 @@ def build(
         dry_or_raise(str(e))
     if not common.DRY:
         debug_info = "CONFIG_DEBUG_INFO_NONE=y" not in (out / ".config").read_text()
-        check_disk(6 if debug_info else 2, "this build")
+        # A full distro config builds thousands of modules; much bigger than defconfig.
+        # Debug info (DWARF/BTF) roughly doubles the on-disk footprint again.
+        heavy, light = (25, 12) if full else (6, 2)
+        check_disk(heavy if debug_info else light, "this build")
     info(f"building {name} with -j{jobs}")
     run([*make, f"-j{jobs}"])
     # Install modules into the build dir; the VM mounts them at /lib/modules.

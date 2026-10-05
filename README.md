@@ -114,12 +114,63 @@ Variants are ordinary git branches/worktrees: you can also just edit
 ./lab diffconfig v6.12.3-perf myexp-perf
 ```
 
+The three builds along the path from lab VM to real hardware:
+
+```
+# 1. Quick lab build: minimal defconfig+kvm_guest config, fast to build, boots the VM.
+./lab build v6.8.12 -p perf
+
+# 2. Full VM build from your host (distro) config, trimmed to fit and still VM-bootable:
+#    olddefconfig-adapted host config + lab-vm overlay + certs fix, debug info off.
+./lab build v6.8.12 --base-config host --no-debug-info
+
+# 3. Full build for real hardware: the exact host config (--raw = no lab-vm overlay),
+#    debug info off. This is the artifact you package; it may not boot the lab VM.
+./lab build v6.8.12 --base-config host --no-debug-info --raw
+```
+
 Config = `defconfig` + `kvm_guest.config` + `configs/base.config` + profile + `-f` fragments.
 `base` includes BTF (needed by eBPF tools and the telemetry), so builds need `pahole`
 (`sudo apt install dwarves`); debug info only affects the build, not the running kernel.
 Options you asked for that kconfig dropped (unmet dependencies) are reported as warnings.
 Modules are installed into `builds/<b>/modroot` and appear at `/lib/modules` in the guest.
 `compile_commands.json` is generated and linked into the tree for clangd.
+
+### Full configs (`--base-config`)
+
+To build the config you'd actually run on real hardware (the Stage-2 "full config"
+gate before a laptop/Pi), start from a complete `.config` instead of `defconfig`:
+
+```
+./lab build v6.12.3 --base-config host        # /boot/config-$(uname -r) (your distro)
+./lab build v6.12.3 --base-config arch         # Arch's public config (fetched, cached)
+./lab build v6.12.3 --base-config path/to/.config      # a local file (.gz ok)
+./lab build v6.12.3 --base-config https://…/config     # any URL (.gz ok)
+```
+
+The config is copied in, adapted to the target tree with `make olddefconfig`, then the
+profile and any `-f` fragments are merged on top. The source, its sha256 and whether
+`--raw` was used are recorded in `builds/<b>/lab-build.json` (provenance). Downloads are
+cached under `configs/.cache/`. Ubuntu has no single downloadable per-version config, so
+use `--base-config host` on an Ubuntu machine (a remote Ubuntu-by-version source is a
+planned follow-up).
+
+A full distro config with DWARF + BTF is a 20–30 GB build. For a config/boot validation
+you rarely need debug info, so `--no-debug-info` disables DWARF and BTF (roughly halving
+build size and disk use); you lose source-level gdb and BTF-based eBPF, but the running
+kernel is unaffected. Distro configs also point module-signing at packaging files a
+vanilla tree lacks (`debian/canonical-certs.pem`), which would fail the build at the
+certs step — the tool clears those automatically (unless `--raw`).
+
+> **⚠️ virtio / 9p must be built-in, or the lab VM won't boot.**
+> A distro config ships `virtio`, `9p` and friends as **modules**. But the lab boots the
+> kernel directly (`-kernel`) and mounts the module tree *over 9p* — so the 9p and virtio
+> drivers needed to reach `/lib/modules` aren't loaded yet. To avoid that chicken-and-egg,
+> `--base-config` merges [`configs/lab-vm.config`](configs/lab-vm.config) on top, forcing
+> those few symbols (`VIRTIO*`, `EXT4_FS`, `NET_9P*`, `9P_FS`, `SERIAL_8250_CONSOLE`)
+> **built-in**. Pass **`--raw`** to skip this overlay and build the *exact* ship config —
+> correct for packaging to real hardware, but such a build may not boot the lab VM (Gate 1)
+> until you add those options yourself.
 
 ## Booting
 
