@@ -5,8 +5,11 @@
 <p align="center"><b>Linux kernel lab toolset</b></p>
 
 <p align="center">
+  <a href="https://github.com/amdrozdov/klab/actions/workflows/tests.yml">
+    <img src="https://github.com/amdrozdov/klab/actions/workflows/tests.yml/badge.svg?branch=main" alt="Tests: passing or failing">
+  </a>
   <a href="https://github.com/amdrozdov/klab/actions/workflows/ci.yml">
-    <img src="https://github.com/amdrozdov/klab/actions/workflows/ci.yml/badge.svg" alt="CI status">
+    <img src="https://github.com/amdrozdov/klab/actions/workflows/ci.yml/badge.svg?branch=main" alt="Lint and types: passing or failing">
   </a>
 </p>
 
@@ -93,7 +96,8 @@ Cleaning up (check names and sizes with `./lab ls` first; add `--dry` to preview
 
 Start over completely with `./lab clean` (or `make clean`): it lists every lab-data path with
 its size and asks `[y/N]` before deleting trees, builds, the rootfs image, runs, `.lab/`,
-`shared/*` and monitoring targets. It only deletes what `.gitignore` marks as ignored (so
+`shared/*` and monitoring targets (but keeps `.lab/pi.json`, your Raspberry Pi settings).
+It only deletes what `.gitignore` marks as ignored (so
 uncommitted sources are safe), never touches `experiments/` or `configs/`, keeps `.venv`,
 refuses while a lab VM is running, and needs `--yes` when there is no terminal.
 The observe stack's stored metrics live in docker volumes: `./lab observe down --wipe`.
@@ -127,6 +131,11 @@ The three builds along the path from lab VM to real hardware:
 # 3. Full build for real hardware: the exact host config (--raw = no lab-vm overlay),
 #    debug info off. This is the artifact you package; it may not boot the lab VM.
 ./lab build v6.8.12 --base-config host --no-debug-info --raw
+
+# 4. A kernel for the Raspberry Pi 4 (arm64, cross-built; needs gcc-aarch64-linux-gnu):
+#    see "Custom kernels on the Pi" below. -n sets the build name, which also shows
+#    up in `uname -r` on the Pi.
+./lab build v6.18.55 --arch pi -n pi618
 ```
 
 Config = `defconfig` + `kvm_guest.config` + `configs/base.config` + profile + `-f` fragments.
@@ -329,6 +338,120 @@ Things to try:
 - Initcall costs per subsystem: `pci_subsys_init` (PCI enumeration), `acpi_init` (ACPI
   namespace) dominate `subsys`; compare after trimming the config or with `--cpus 1`.
 - Userspace: `systemd-binfmt` and `systemd-networkd` each take ~1 s in this rootfs.
+
+## Raspberry Pi (`lab pi`)
+
+Put Raspberry Pi OS on a USB stick or SD card with your user, Wi-Fi and ssh already
+configured, boot the Pi, and log in with one command.
+
+```
+./lab pi setup deb            # find the stick, ask once, write Raspberry Pi OS Lite (64-bit)
+                              # -> put it in the Pi, power on, wait 2-3 minutes
+./lab pi shell                # first time: finds <hostname>.local, or explains how to find the Pi
+./lab pi host 192.168.1.50    # save the Pi's address (and --port) once you know it
+./lab pi shell                # ssh with the saved host, port, user and password
+./lab pi shell -- uname -a    # run one command instead of a shell
+./lab pi show                 # saved settings (passwords hidden; --show-secrets)
+```
+
+`setup` autodetects removable disks (USB sticks, SD cards, card readers; a reader with no
+card shows as 0 B and is skipped) and never offers a disk that holds a system mount. It
+asks for username, password, Wi-Fi name and password (empty = no Wi-Fi) and the Wi-Fi
+country, then **asks you to type the device name before erasing it**. Everything you answer
+is saved, so the next `setup` asks nothing (`--ask` to be asked again; every answer is also
+a flag, e.g. `--user`, `--wifi-ssid`, `--device /dev/sdb`).
+
+How it works: the current image is looked up in the Raspberry Pi Imager OS list, downloaded
+into `images/pi/` and verified against its published SHA-256 (cached for next time). A copy
+gets `user-data` (user with a password hash, hostname, ssh password login), `network-config`
+(Wi-Fi) and an empty `ssh` file written into its boot partition with `mtools`, and only the
+final `dd` needs `sudo`. On first boot the Pi applies them with cloud-init, joins the
+Wi-Fi and starts sshd. `--no-write` only prepares `images/pi/custom.img`; `--dry` prints
+every command. Only current cloud-init images are supported (not the legacy ones).
+
+`lab pi shell` finds the Pi at `<hostname>.local` (mDNS). If that fails it prints how to
+look for it on your network, with your actual subnet (`sudo nmap -sn 192.168.1.0/24`), and
+you save the address with `lab pi host <ip>`. Password login uses `SSH_ASKPASS` (OpenSSH
+8.4+), so `sshpass` is not needed; the Pi's host key is kept in `.lab/pi_known_hosts`
+and reset on every reflash.
+
+Settings live in `.lab/pi.json` (mode 0600, gitignored; `lab clean` keeps it). The passwords
+are stored in plain text there, as is the Wi-Fi password in `network-config` on the stick.
+Needs `mtools` and `openssl` (`lab doctor` checks; `nmap` is optional).
+
+### Custom kernels on the Pi
+
+Build your own kernel and boot the Pi with it. The Pi must already be set up and
+reachable (`lab pi shell` works), and the host needs the cross-compiler
+(`make deps-pi`, or `sudo apt install gcc-aarch64-linux-gnu`).
+
+```
+./lab fetch 6.18.55                              # a kernel.org tree (6.18.y matches Raspberry Pi OS)
+./lab build v6.18.55 --arch pi -n pi618 --no-debug-info        # -> builds/pi618   (-n NAME is optional)
+./lab pi kernel install pi618 --reboot           # copy it to the Pi, boot it from now on
+./lab pi kernel status                           # uname -r on the Pi: 6.18.55-klab-pi618
+
+# in case of issues only
+./lab pi kernel stock --reboot                   # (optional)back to the stock Raspberry Pi OS kernel
+```
+
+The **build name** is what you pass to `lab pi kernel install` and what identifies the
+kernel on the Pi: `uname -r` there is `<kernel version>-klab-<build name>`, so with
+`-n pi618` it reads `6.18.55-klab-pi618`. Without `-n` the name is `<tree>-pi`
+(`v6.18.55-pi`, release `6.18.55-klab-v6.18.55-pi`). Use a different name for each variant
+you want to tell apart, for example `-n pi618-nopreempt`; the whole release must stay under
+64 characters. `lab pi kernel install` without a name installs the last Pi build you made,
+and `lab ls` lists them (marked `[pi]`).
+
+`--arch pi` cross-compiles for arm64 and starts from the **stock Raspberry Pi OS kernel
+config of your Pi** (read over ssh from `/boot/config-*-rpi-v8`, cached in
+`configs/.cache/`; it stays the stock one even while your own kernel runs, and the cached
+copy is used when the Pi is off). That config already has everything a Pi 4 needs to boot
+built in, so no initramfs is required; options that exist only in Raspberry Pi's own
+kernel fork simply drop out on a kernel.org tree.
+Other bases: `--base-config defconfig` (generic arm64) or a path / URL. `configs/pi.config`
+pins the boot-critical drivers whatever the base. A Pi build never replaces your default x86
+build, and it cannot boot in the lab VM (`lab boot` refuses it).
+
+`lab pi kernel install` puts the kernel **next to** the stock one, it replaces nothing:
+
+- the kernel (`kernel8.img`), the Pi 4 device trees and a copy of the live `cmdline.txt`
+  go to `/boot/firmware/klab/`, the modules to `/lib/modules/<release>`;
+- a block at the end of `config.txt` (between `# klab begin` and `# klab end`) sets
+  `os_prefix=klab/`, which makes the firmware load the kernel, device tree and
+  `cmdline.txt` from that directory, and `auto_initramfs=0`;
+- the change is permanent until `lab pi kernel stock` removes the block.
+
+If the kernel does not boot: the firmware falls back to the stock kernel by itself when
+`klab/` has no kernel or device tree; for any other failure put the card in a PC and delete
+the `# klab begin` ... `# klab end` block from `config.txt` on the `bootfs` partition.
+Only the Pi 4 is supported for now.
+
+### Stress-testing the Pi (`lab pi stress`)
+
+Run stress-ng on the Pi and keep the result as a normal run, to compare kernels on real
+hardware:
+
+```
+./lab pi stress                  # profile "quick": cpu, switch, pipe, futex, vm, memcpy
+./lab pi stress kernel -r 5      # kernel-heavy profile, 5 repeats
+./lab pi stress --list           # profiles (benchmarks/pi/*.stress)
+
+./lab pi kernel stock --reboot   # then: ./lab pi stress
+./lab pi kernel install pi618 --reboot   # then: ./lab pi stress
+./lab compare latest:stock latest:pi618
+```
+
+It installs `stress-ng` on the Pi if it is missing (`apt`), runs every stressor on its own
+for `-t` seconds (default 20) and `-r` times (default 3), and saves
+`runs/<id>/result.json` (the metric is bogo-ops per second, real time) next to the raw
+stress-ng YAML in `runs/<id>/raw/`. The run is labelled with the build the Pi is running
+(`stock` for Raspberry Pi OS's own kernel), so `lab runs`, `lab show` and `lab compare` work
+on it like on any benchmark run. A stressor line in a profile is
+`name[:workers] [stress-ng options]`; the default is one worker per CPU, and `vm` is sized
+as a share of free memory so it never swaps. Stop whatever else runs on the Pi first: the
+command does not check, and a busy or hot Pi gives noisy numbers (the result records the
+governor and the temperature before and after).
 
 ## License
 

@@ -27,7 +27,7 @@ from .common import (
     show,
     warn,
 )
-from .kernel import build_dir
+from .kernel import build_dir, require_x86
 
 ROOTFS_DOCKER_TAG = "klab-rootfs"
 DEFAULT_CPUS = 4
@@ -179,6 +179,7 @@ def qemu_cmd(
     net: bool = True,
     telemetry: observe.Session | None = None,
 ) -> list[str]:
+    require_x86(build)
     if not ROOTFS_IMAGE.exists():
         dry_or_raise("no rootfs image yet (run `lab rootfs`)")
     if not os.access("/dev/kvm", os.R_OK | os.W_OK):
@@ -331,6 +332,7 @@ def run_job(
 
 def gdb(build: str) -> None:
     """Attach gdb to a VM started with `lab boot --gdb`."""
+    require_x86(build)
     out = build_dir(build)
     vmlinux = out / "vmlinux"
     if not vmlinux.exists():

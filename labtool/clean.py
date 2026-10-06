@@ -3,6 +3,7 @@
 Only paths that .gitignore marks as ignored are removed (git clean -X semantics), so
 source files are safe even when they are not committed yet. experiments/ and configs/
 are never touched, and .venv (the environment running this command) is kept.
+.lab/pi.json (the `lab pi` settings, incl. credentials) is kept too.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ from . import common
 from .common import ROOT, LabError, du, human, info, show, table, warn
 
 KEEP = ("experiments/", "configs/", ".venv/")
+# Files inside otherwise-deleted lab data that are user settings, not lab data.
+PRESERVE = (".lab/pi.json",)
 # Used when ROOT is not a git repository: the lab data locations from .gitignore.
 FALLBACK = ["trees/", "builds/", "images/", "runs/", ".lab/", "monitoring/targets/"]
 
@@ -25,6 +28,21 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
 
 def _is_repo() -> bool:
     return _git("rev-parse", "--show-toplevel").stdout.strip() == str(ROOT)
+
+
+def _spare_preserved(paths: list[str]) -> list[str]:
+    """Replace a directory that holds a PRESERVE file by its other direct children."""
+    out: list[str] = []
+    for p in paths:
+        inside = [k for k in PRESERVE if p.endswith("/") and k.startswith(p)]
+        if not inside or not (ROOT / p).is_dir():
+            out.append(p)
+            continue
+        for child in sorted((ROOT / p).iterdir()):
+            rel = f"{p}{child.name}" + ("/" if child.is_dir() else "")
+            if rel not in PRESERVE:
+                out.append(rel)
+    return out
 
 
 def targets() -> list[str]:
@@ -42,6 +60,7 @@ def targets() -> list[str]:
         paths += [
             f"shared/{p.name}" for p in (ROOT / "shared").glob("*") if p.name != ".keep"
         ]
+    paths = _spare_preserved(paths)
     keep = [p for p in paths if p.startswith(KEEP)]
     return [p for p in paths if p not in keep]
 
@@ -78,7 +97,7 @@ def clean(yes: bool = False) -> None:
     print(table(rows, ["will delete", "size"]))
     print(
         f"\ntotal: {human(total)} in {len(paths)} paths; kept: tracked files, "
-        f"{', '.join(KEEP)}"
+        f"{', '.join((*KEEP, *PRESERVE))}"
     )
 
     other = untracked_not_ignored()

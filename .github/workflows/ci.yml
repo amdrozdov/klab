@@ -1,4 +1,4 @@
-name: CI
+name: Lint and types
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Lint (ruff)
-        run: uv run ruff check labtool
+        run: uv run ruff check labtool tests
 
       - name: Typecheck (mypy)
         run: uv run mypy

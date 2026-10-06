@@ -1,0 +1,9 @@
+# Quick check of CPU, scheduler, IPC and memory (about 6 minutes at 3 repeats of 20 s).
+# One stressor per line: name[:workers] [stress-ng options]. Without :workers every
+# stressor gets one worker per CPU of the Pi. vm sizes are a share of free memory.
+cpu --cpu-method matrixprod
+switch
+pipe
+futex
+vm:2 --vm-bytes 25%
+memcpy

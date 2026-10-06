@@ -10,6 +10,7 @@ import re
 import subprocess
 import urllib.request
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,26 @@ NO_DEBUGINFO_FRAGMENT = "no-debuginfo"
 
 # Downloaded / decompressed base configs are cached here (gitignored).
 CONFIG_CACHE = CONFIGS / ".cache"
+
+# Merged for `--arch pi` builds: pins what a Pi 4 needs to boot without an initramfs.
+PI_FRAGMENT = "pi"
+
+
+@dataclass(frozen=True)
+class Arch:
+    """A build target: how to invoke make and where the kernel image ends up."""
+
+    name: str
+    make_arch: str  # ARCH=
+    cross: str  # CROSS_COMPILE= prefix ("" = native)
+    image: str  # kernel image, relative to the build dir
+    vm: bool  # can it boot in the lab's QEMU VM?
+
+
+ARCHES: dict[str, Arch] = {
+    "x86": Arch("x86", "x86_64", "", "arch/x86/boot/bzImage", vm=True),
+    "pi": Arch("pi", "arm64", "aarch64-linux-gnu-", "arch/arm64/boot/Image.gz", vm=False),
+}
 
 # Public full-config sources for `--base-config <name>`: name -> (version, arch)
 # -> URL of a single complete .config. Ubuntu is intentionally absent — it has no
@@ -305,7 +326,9 @@ def _forget_default(tree: str | None = None, build: str | None = None) -> None:
     """Clear the current default tree/build if it is the one being removed."""
     state = load_state()
     clear = {
-        k: None for k, v in (("tree", tree), ("build", build)) if v and state.get(k) == v
+        k: None
+        for k, v in (("tree", tree), ("build", build), ("pi_build", build))
+        if v and state.get(k) == v
     }
     if clear:
         save_state(**clear)
@@ -348,6 +371,24 @@ def build_meta(name: str) -> dict[str, Any]:
         return json.loads((build_dir(name) / "lab-build.json").read_text())
     except (OSError, ValueError):
         return {}
+
+
+def build_arch(name: str) -> str:
+    """'x86' or 'pi' (builds made before --arch existed are x86)."""
+    return str(build_meta(name).get("arch") or "x86")
+
+
+def build_image(name: str) -> Path:
+    return build_dir(name) / ARCHES[build_arch(name)].image
+
+
+def require_x86(name: str) -> None:
+    """The lab VM is x86: refuse builds made for other targets, with a pointer."""
+    if build_arch(name) != "x86":
+        raise LabError(
+            f"build '{name}' is for the Raspberry Pi (arm64), not the lab VM; "
+            f"install it on the Pi with `lab pi kernel install {name}`"
+        )
 
 
 def list_builds() -> list[str]:
@@ -505,8 +546,9 @@ def _fetch(url: str, dest: Path) -> Path:
 def resolve_base_config(source: str, version: str, arch: str) -> Path:
     """Resolve a --base-config SOURCE to a local full .config.
 
-    SOURCE is 'host' (the running kernel's config), a known distro name
-    (see KNOWN_CONFIGS), a URL, or a local path (optionally gzipped)."""
+    SOURCE is 'host' (the running kernel's config), 'pi' (the config of the kernel
+    running on the saved Raspberry Pi), a known distro name (see KNOWN_CONFIGS), a URL,
+    or a local path (optionally gzipped)."""
     if not common.DRY:
         CONFIG_CACHE.mkdir(parents=True, exist_ok=True)
 
@@ -522,6 +564,11 @@ def resolve_base_config(source: str, version: str, arch: str) -> Path:
             "(pass a path or URL to --base-config instead)"
         )
         return plain
+
+    if source == "pi":
+        from . import pi  # local import: pi.py is built on top of the kernel helpers
+
+        return pi.fetch_kernel_config()
 
     if source in KNOWN_CONFIGS:
         url = KNOWN_CONFIGS[source](version, arch)
@@ -542,6 +589,28 @@ def resolve_base_config(source: str, version: str, arch: str) -> Path:
     return p.resolve()
 
 
+LOCALVERSION_MAX = 64  # the kernel release string (uname -r) is limited to 64 bytes
+
+
+def localversion(name: str) -> str:
+    """The CONFIG_LOCALVERSION that makes `uname -r` on the target name the build."""
+    return "-klab-" + re.sub(r"[^A-Za-z0-9._+-]", "-", name)
+
+
+def localversion_fragment(out: Path, name: str, version: str) -> Path:
+    """Write out/lab-localversion.config (CONFIG_LOCALVERSION="-klab-<build>")."""
+    lv = localversion(name)
+    if len(version) + len(lv) > LOCALVERSION_MAX - 2:
+        raise LabError(
+            f"build name '{name}' is too long: the kernel release '{version}{lv}' "
+            f"must stay under {LOCALVERSION_MAX} characters (use -n to shorten it)"
+        )
+    path = out / "lab-localversion.config"
+    if not common.DRY:
+        path.write_text(f'CONFIG_LOCALVERSION="{lv}"\n')
+    return path
+
+
 def build(
     tree: str | None = None,
     profile: str = "perf",
@@ -551,15 +620,39 @@ def build(
     reconfig: bool = False,
     menuconfig: bool = False,
     olddefconfig_only: bool = False,
-    base_config: str = "defconfig",
+    base_config: str | None = None,
     raw: bool = False,
     no_debug_info: bool = False,
+    arch: str = "x86",
 ) -> str:
     tree = default_tree(tree)
     src = tree_path(tree)
+    spec = ARCHES[arch]
+    pi = arch == "pi"
+    if base_config is None:
+        base_config = (
+            "pi" if pi else "defconfig"
+        )  # a Pi build starts from the Pi's config
+    if pi:
+        if raw:
+            raise LabError(
+                "--raw is for the x86 lab VM overlay; it has no meaning for --arch pi"
+            )
+        if base_config == "host" or base_config in KNOWN_CONFIGS:
+            raise LabError(
+                f"--base-config {base_config} is an x86 config; for --arch pi use 'pi' "
+                "(the config of the kernel running on your Pi), 'defconfig', a path "
+                "or a URL"
+            )
+        if spec.cross and not have(f"{spec.cross}gcc"):
+            dry_or_raise(
+                f"{spec.cross}gcc not found (sudo apt install gcc-aarch64-linux-gnu)"
+            )
     full = base_config != "defconfig"
     if name is None:
-        if not full:
+        if pi:
+            name = f"{tree}-pi"
+        elif not full:
             name = f"{tree}-{profile}"
         elif base_config == "host" or base_config in KNOWN_CONFIGS:
             name = f"{tree}-{base_config}"
@@ -572,8 +665,19 @@ def build(
     # defconfig: build up from defconfig + kvm_guest + base fragment + profile.
     # full base config: start from it, overlay the VM-boot essentials (unless --raw)
     # and the profile; the kvm_guest/base fragments are NOT forced on.
-    base_cfg = resolve_base_config(base_config, tree, "x86_64") if full else None
-    if not full:
+    base_cfg = resolve_base_config(base_config, tree, spec.make_arch) if full else None
+    if not common.DRY:
+        out.mkdir(parents=True, exist_ok=True)
+    if pi:
+        # The stock Pi config (or arm64 defconfig) + pins for booting without an
+        # initramfs + the profile + a LOCALVERSION that names this build.
+        version = output(["make", "-s", "-C", src, "kernelversion"]) or "?"
+        frag_paths = [
+            fragment_path(PI_FRAGMENT),
+            fragment_path(profile),
+            localversion_fragment(out, name, version),
+        ]
+    elif not full:
         frag_paths = [fragment_path(BASE_FRAGMENT), fragment_path(profile)]
     elif raw:
         frag_paths = []
@@ -590,9 +694,9 @@ def build(
     if not common.DRY:
         out.mkdir(parents=True, exist_ok=True)
     hash_srcs = ([base_cfg] if base_cfg else []) + frag_paths
-    inputs_hash = hashlib.sha256(
-        b"".join(_safe_bytes(p) for p in hash_srcs)
-    ).hexdigest()[:12]
+    inputs_hash = hashlib.sha256(b"".join(_safe_bytes(p) for p in hash_srcs)).hexdigest()[
+        :12
+    ]
 
     meta = build_meta(name)
     if meta and meta.get("tree") != tree:
@@ -600,9 +704,11 @@ def build(
             f"build '{name}' belongs to tree '{meta.get('tree')}', not '{tree}'"
         )
 
-    make = ["make", "-C", src, f"O={out}", "ARCH=x86_64"]
+    make = ["make", "-C", src, f"O={out}", f"ARCH={spec.make_arch}"]
+    if spec.cross:
+        make.append(f"CROSS_COMPILE={spec.cross}")
     if have("ccache"):
-        make.append("CC=ccache gcc")
+        make.append(f"CC=ccache {spec.cross}gcc")
 
     if (
         reconfig
@@ -611,9 +717,14 @@ def build(
     ):
         overlay = ", ".join(p.stem for p in frag_paths)
         if base_cfg is None:
-            info(f"configuring {name}: defconfig + kvm_guest + {overlay}")
+            info(
+                f"configuring {name}: defconfig"
+                + ("" if pi else " + kvm_guest")
+                + f" + {overlay}"
+            )
             run([*make, "defconfig"])
-            run([*make, "kvm_guest.config"])
+            if not pi:
+                run([*make, "kvm_guest.config"])
         else:
             info(
                 f"configuring {name}: base config '{base_config}'"
@@ -647,7 +758,11 @@ def build(
             for p in frag_paths
         ],
         "fragments_hash": inputs_hash,
+        "arch": arch,
+        "image": spec.image,
     }
+    if pi:
+        meta["localversion"] = localversion(name)
     if base_cfg is not None:
         meta["base_config"] = {
             "source": base_config,
@@ -659,7 +774,10 @@ def build(
         (out / "lab-build.json").write_text(
             json.dumps({**build_meta(name), **meta}, indent=2) + "\n"
         )
-    save_state(tree=tree, build=name)
+    if pi:  # keep `lab boot` / `lab bench` pointing at the last x86 build
+        save_state(tree=tree, pi_build=name)
+    else:
+        save_state(tree=tree, build=name)
 
     if menuconfig:
         run([*make, "menuconfig"])
@@ -677,7 +795,12 @@ def build(
         heavy, light = (25, 12) if full else (6, 2)
         check_disk(heavy if debug_info else light, "this build")
     info(f"building {name} with -j{jobs}")
-    run([*make, f"-j{jobs}"])
+    if pi:
+        # Image.gz is what the Pi firmware loads; dtbs are not part of `make all` here.
+        run([*make, f"-j{jobs}", "Image.gz", "modules"])
+        run([*make, f"-j{jobs}", "dtbs"])
+    else:
+        run([*make, f"-j{jobs}"])
     # Install modules into the build dir; the VM mounts them at /lib/modules.
     modroot = out / "modroot"
     remove_tree(modroot)
@@ -685,6 +808,10 @@ def build(
         [*make, f"INSTALL_MOD_PATH={modroot}", "INSTALL_MOD_STRIP=1", "modules_install"],
         quiet=False,
     )
+    if pi:
+        dtbroot = out / "dtbroot"
+        remove_tree(dtbroot)
+        run([*make, f"INSTALL_DTBS_PATH={dtbroot}", "dtbs_install"])
     # compile_commands.json for clangd/VS Code navigation of this exact config.
     run([*make, "compile_commands.json"], check=False)
     cc = out / "compile_commands.json"
@@ -704,7 +831,8 @@ def build(
         config_hash=config_hash(out),
     )
     (out / "lab-build.json").write_text(json.dumps(meta, indent=2) + "\n")
-    info(f"built {name}: {release}  (next: lab boot {name})")
+    nxt = f"lab pi kernel install {name}" if pi else f"lab boot {name}"
+    info(f"built {name}: {release}  (next: {nxt})")
     return name
 
 

@@ -1,0 +1,10 @@
+# Kernel-heavy stressors: scheduler, IPC, process / thread creation and memory
+# (about 8 minutes at 3 repeats of 20 s). Format: see quick.stress.
+switch
+pipe
+futex
+fork
+mq
+pthread
+vm:2 --vm-bytes 25%
+memcpy

@@ -10,6 +10,8 @@
 #   make boottrace [BUILD=...]     trace every boot step; waterfall in Grafana (Boot dashboard)
 #   make clean                     delete all lab data (trees, builds, rootfs, runs); asks [y/N]
 #   make lint / make typecheck     run ruff / mypy over labtool (dev tools: uv sync)
+#   make test                      unit tests (tests/)
+#   make deps-pi                   cross-compiler + mtools for Raspberry Pi builds (lab pi)
 #   any target + DRY=1             only print the commands (e.g. make boot DRY=1)
 
 LAB      := ./lab $(if $(DRY),--dry)
@@ -21,20 +23,26 @@ BUILD    ?=
 BENCH    ?=
 REPEAT   ?= 5
 
-.PHONY: help clean deps doctor observe observe-down boottrace rtree latest fetch build rootfs boot gdb bench runs ls lint typecheck
+.PHONY: help clean deps deps-pi doctor observe observe-down boottrace rtree latest fetch build rootfs boot gdb bench runs ls lint typecheck test
 
 help:
-	@sed -n '1,14p' Makefile
+	@sed -n '1,16p' Makefile
 
 deps:
 	sudo apt install -y build-essential flex bison bc libelf-dev libssl-dev \
 		ccache dwarves qemu-system-x86 gdb
 
+deps-pi:
+	sudo apt install -y gcc-aarch64-linux-gnu mtools
+
 lint:
-	uv run ruff check labtool
+	uv run ruff check labtool tests
 
 typecheck:
 	uv run mypy
+
+test:
+	uv run python -m unittest discover -s tests
 
 doctor:
 	@$(LAB) doctor

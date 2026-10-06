@@ -8,7 +8,7 @@ import re
 import sys
 from typing import Any
 
-from . import bench, boottrace, clean, kernel, observe, vm
+from . import bench, boottrace, clean, kernel, observe, pi, pistress, vm
 from .common import (
     BUILDS,
     ROOTFS_IMAGE,
@@ -51,6 +51,10 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     print("optional:")
     for t, why in (
         ("ccache", "much faster rebuilds"),
+        ("aarch64-linux-gnu-gcc", "build for the Pi: apt install gcc-aarch64-linux-gnu"),
+        ("mcopy", "lab pi setup: apt install mtools"),
+        ("openssl", "lab pi setup: password hashing"),
+        ("nmap", "find the Pi on your network: apt install nmap"),
         (
             "virt-customize",
             "boot a build against a distro image: apt install libguestfs-tools",
@@ -120,13 +124,14 @@ def cmd_ls(_: argparse.Namespace) -> None:
         rows = []
         for b in builds:
             m = kernel.build_meta(b)
-            cur = "*" if state.get("build") == b else ""
-            img = (BUILDS / b / "arch/x86/boot/bzImage").exists()
+            cur = "*" if b in (state.get("build"), state.get("pi_build")) else ""
+            img = kernel.build_image(b).exists()
             rows.append(
                 [
                     cur + b,
                     m.get("tree", "?"),
-                    m.get("profile", "?"),
+                    m.get("profile", "?")
+                    + ("" if kernel.build_arch(b) == "x86" else " [pi]"),
                     m.get("kernelrelease", "-") if img else "(not built)",
                     m.get("config_hash", ""),
                     human(du(BUILDS / b)),
@@ -281,6 +286,7 @@ def cmd_build(a: argparse.Namespace) -> None:
         base_config=a.base_config,
         raw=a.raw,
         no_debug_info=a.no_debug_info,
+        arch=a.arch,
     )
 
 
@@ -390,6 +396,57 @@ def cmd_rm(a: argparse.Namespace) -> None:
         {"tree": kernel.tree_rm, "build": kernel.build_rm, "run": bench.rm_run}[a.kind](
             name
         )
+
+
+def cmd_pi_setup(a: argparse.Namespace) -> None:
+    pi.setup(
+        a.os,
+        {
+            "user": a.user,
+            "password": a.password,
+            "hostname": a.hostname,
+            "wifi_ssid": a.wifi_ssid,
+            "wifi_psk": a.wifi_psk,
+            "wifi_country": a.wifi_country,
+        },
+        device=a.device,
+        ask=a.ask,
+        yes=a.yes,
+        no_write=a.no_write,
+        keep_image=a.keep_image,
+    )
+
+
+def cmd_pi_shell(a: argparse.Namespace) -> int:
+    return pi.shell(a.remote)
+
+
+def cmd_pi_host(a: argparse.Namespace) -> None:
+    pi.host(a.addr, a.port)
+
+
+def cmd_pi_show(a: argparse.Namespace) -> None:
+    pi.show_config(a.show_secrets)
+
+
+def cmd_pi_stress(a: argparse.Namespace) -> None:
+    if a.list:
+        for name, what in pistress.list_profiles().items():
+            print(f"{name:10} {what}")
+        return
+    pistress.stress(a.profile, a.repeat, a.timeout, a.label, a.workers)
+
+
+def cmd_pi_kernel_install(a: argparse.Namespace) -> None:
+    pi.kernel_install(a.build, reboot=a.reboot)
+
+
+def cmd_pi_kernel_status(_: argparse.Namespace) -> None:
+    pi.kernel_status()
+
+
+def cmd_pi_kernel_stock(a: argparse.Namespace) -> None:
+    pi.kernel_stock(reboot=a.reboot)
 
 
 def add_vm_args(p: argparse.ArgumentParser) -> None:
@@ -511,15 +568,29 @@ def parser() -> argparse.ArgumentParser:
         default=[],
         help="extra config fragment from configs/ (repeatable)",
     )
-    s.add_argument("-n", "--name", help="build name (default: <tree>-<profile>)")
+    s.add_argument(
+        "-n",
+        "--name",
+        help="build name (default: <tree>-<profile>, <tree>-pi for --arch pi); "
+        "for --arch pi it becomes part of `uname -r` on the Pi",
+    )
     s.add_argument("-j", "--jobs", type=int)
+    s.add_argument(
+        "-a",
+        "--arch",
+        choices=["x86", "pi"],
+        default="x86",
+        help="x86 = lab VM kernel (default) | pi = Raspberry Pi 4 (arm64, cross-built; "
+        "install with `lab pi kernel install`)",
+    )
     s.add_argument(
         "-c",
         "--base-config",
-        default="defconfig",
+        default=None,
         metavar="SOURCE",
         help="start from a full config instead of defconfig+kvm_guest: "
-        "host | arch | <path> | <url>  (host = /boot/config-$(uname -r))",
+        "host | arch | <path> | <url>  (host = /boot/config-$(uname -r)); "
+        "for --arch pi the default is 'pi' = the config of the kernel on your Pi",
     )
     s.add_argument(
         "--raw",
@@ -657,6 +728,89 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("kind", choices=["tree", "build", "run"])
     s.add_argument("names", nargs="+")
     s.set_defaults(func=cmd_rm)
+
+    s = sub.add_parser(
+        "pi",
+        parents=[dry],
+        help="set up a Raspberry Pi (OS on a USB/SD stick) and ssh in",
+    )
+    psub = s.add_subparsers(dest="picmd", required=True, metavar="SUBCOMMAND")
+    r = psub.add_parser(
+        "setup",
+        parents=[dry],
+        help="write Raspberry Pi OS to a USB/SD stick with user, ssh and Wi-Fi preset",
+    )
+    r.add_argument(
+        "os", choices=sorted(pi.OS_CHOICES), help="deb = Raspberry Pi OS Lite (Debian)"
+    )
+    r.add_argument(
+        "-d", "--device", help="target disk, e.g. /dev/sdb (default: autodetect)"
+    )
+    r.add_argument("-u", "--user", help="username (asked once, then saved)")
+    r.add_argument("--password", help="password (prefer the prompt: argv shows in ps)")
+    r.add_argument("--hostname", help=f"hostname (default {pi.DEFAULT_HOSTNAME})")
+    r.add_argument("--wifi-ssid", help="Wi-Fi network name; '' = no Wi-Fi")
+    r.add_argument("--wifi-psk", help="Wi-Fi password (prefer the prompt)")
+    r.add_argument("--wifi-country", help="Wi-Fi regulatory country, e.g. DE")
+    r.add_argument("--ask", action="store_true", help="ask for every setting again")
+    r.add_argument("-y", "--yes", action="store_true", help="don't ask before erasing")
+    r.add_argument(
+        "--no-write", action="store_true", help="only prepare images/pi/custom.img"
+    )
+    r.add_argument(
+        "--keep-image", action="store_true", help="keep the customised image afterwards"
+    )
+    r.set_defaults(func=cmd_pi_setup)
+    r = psub.add_parser("shell", parents=[dry], help="ssh into the saved Raspberry Pi")
+    r.add_argument("remote", nargs="*", help="run this command instead of a shell")
+    r.set_defaults(func=cmd_pi_shell)
+    r = psub.add_parser("host", parents=[dry], help="show or save the Pi's address")
+    r.add_argument("addr", nargs="?", metavar="HOST", help="IP address or hostname")
+    r.add_argument("-p", "--port", type=int, help="ssh port (default 22)")
+    r.set_defaults(func=cmd_pi_host)
+    r = psub.add_parser("show", parents=[dry], help="show the saved Pi settings")
+    r.add_argument("--show-secrets", action="store_true", help="print passwords too")
+    r.set_defaults(func=cmd_pi_show)
+    r = psub.add_parser(
+        "stress",
+        parents=[dry],
+        help="run stress-ng on the Pi and save the result in runs/",
+    )
+    r.add_argument(
+        "profile",
+        nargs="?",
+        default=pistress.DEFAULT_PROFILE,
+        help="stressor set from benchmarks/pi/ (default %(default)s; --list shows all)",
+    )
+    r.add_argument("-r", "--repeat", type=int, default=3, help="runs per stressor (3)")
+    r.add_argument(
+        "-t", "--timeout", type=int, default=20, help="seconds per stressor (20)"
+    )
+    r.add_argument("-l", "--label", help="tag appended to the run id")
+    r.add_argument(
+        "--workers", type=int, help="workers per stressor (default: the Pi's CPU count)"
+    )
+    r.add_argument("--list", action="store_true", help="list the profiles and exit")
+    r.set_defaults(func=cmd_pi_stress)
+    r = psub.add_parser(
+        "kernel", parents=[dry], help="install a kernel built with `lab build --arch pi`"
+    )
+    ksub = r.add_subparsers(dest="kcmd", required=True, metavar="ACTION")
+    k = ksub.add_parser(
+        "install", parents=[dry], help="copy a Pi build to the Pi and boot it from now on"
+    )
+    k.add_argument(
+        "build", nargs="?", help="build name (default: last `--arch pi` build)"
+    )
+    k.add_argument("--reboot", action="store_true", help="reboot the Pi afterwards")
+    k.set_defaults(func=cmd_pi_kernel_install)
+    k = ksub.add_parser("status", parents=[dry], help="what the Pi runs and boots next")
+    k.set_defaults(func=cmd_pi_kernel_status)
+    k = ksub.add_parser(
+        "stock", parents=[dry], help="boot the stock Raspberry Pi OS kernel again"
+    )
+    k.add_argument("--reboot", action="store_true", help="reboot the Pi afterwards")
+    k.set_defaults(func=cmd_pi_kernel_stock)
     return p
 
 

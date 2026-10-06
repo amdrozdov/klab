@@ -22,6 +22,7 @@ CONFIGS = ROOT / "configs"  # kconfig fragments
 BENCHMARKS = ROOT / "benchmarks"
 ROOTFS_SRC = ROOT / "rootfs"
 STATE_FILE = ROOT / ".lab" / "state.json"
+PI_FILE = ROOT / ".lab" / "pi.json"  # `lab pi` settings (incl. credentials)
 
 ROOTFS_IMAGE = IMAGES / "rootfs.ext4"
 
