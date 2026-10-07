@@ -401,6 +401,17 @@ def compare(refs: Sequence[str], threshold: float | None = None) -> None:
             "some runs had telemetry (eBPF probes) on and some off; "
             "that alone shifts results"
         )
+    if len({r.get("os") for r in runs if r.get("target") == "pi"}) > 1:
+        warn(
+            "runs were taken on different operating systems (userspace, kernel config "
+            "and stress-ng differ), so the differences are not only the kernel"
+        )
+    versions = {r["stress_ng_version"] for r in runs if r.get("stress_ng_version")}
+    if len(versions) > 1:
+        warn(
+            f"runs used different stress-ng versions ({', '.join(sorted(versions))}); "
+            "bogo-ops are not comparable across versions"
+        )
     if len({(r["vm"]["cpus"], r["vm"]["mem"]) for r in runs}) > 1:
         warn("runs used different VM sizes; comparison is apples to oranges")
     print()

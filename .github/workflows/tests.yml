@@ -28,6 +28,9 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Image tools (Arch image integration test)
+        run: sudo apt-get update && sudo apt-get install -y fakeroot dosfstools mtools
+
       - name: Sync dependencies
         run: uv sync --group dev
 

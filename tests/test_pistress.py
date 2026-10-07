@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from labtool import bench, common, pi, pistress
+from labtool import bench, common, pi, pios, pistress
 from labtool.common import LabError
 
 # Output captured from stress-ng 0.19.02 on the Pi (`--metrics-brief --yaml`).
@@ -249,6 +249,9 @@ class TestRun(RunsDir):
         p = mock.patch.object(pi, "connection", return_value=self.conn)
         p.start()
         self.addCleanup(p.stop)
+        d = mock.patch.object(pi, "detect_os", return_value=pios.DEB)
+        d.start()
+        self.addCleanup(d.stop)
 
     def fake_remote(
         self, present: bool = True, facts: str = FACTS, fail_on: int = 0
@@ -264,7 +267,7 @@ class TestRun(RunsDir):
                 return mock.Mock(stdout=facts)
             if command == pistress.END_FACTS:
                 return mock.Mock(stdout="temp_mc=60000\nload=1 1 1\n")
-            if command == pistress.INSTALL:
+            if command == pios.DEB.pkg_install:
                 return mock.Mock(stdout="")
             stress_calls += 1
             if stress_calls == fail_on:
@@ -296,13 +299,13 @@ class TestRun(RunsDir):
 
     def test_does_not_install_when_present(self) -> None:
         self.run_stress()
-        self.assertNotIn(pistress.INSTALL, self.commands)
+        self.assertNotIn(pios.DEB.pkg_install, self.commands)
 
     def test_installs_stress_ng_when_missing(self) -> None:
         self.run_stress(present=False)
-        self.assertIn(pistress.INSTALL, self.commands)
+        self.assertIn(pios.DEB.pkg_install, self.commands)
         self.assertLess(
-            self.commands.index(pistress.INSTALL), self.commands.index(pistress.FACTS)
+            self.commands.index(pios.DEB.pkg_install), self.commands.index(pistress.FACTS)
         )
 
     def test_a_failing_stressor_keeps_the_raw_output_and_writes_no_result(self) -> None:

@@ -145,7 +145,7 @@ class TestImage(unittest.TestCase):
 
     def test_unknown_os(self) -> None:
         with self.assertRaisesRegex(LabError, "unknown OS"):
-            pi.resolve_os_image("arch")
+            pi.resolve_os_image("nope")
 
     def test_mbr_and_boot_offset(self) -> None:
         data = mbr((0x0C, 16384, 1048576), (0x83, 1064960, 4915200))

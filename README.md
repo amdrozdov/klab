@@ -379,6 +379,34 @@ Settings live in `.lab/pi.json` (mode 0600, gitignored; `lab clean` keeps it). T
 are stored in plain text there, as is the Wi-Fi password in `network-config` on the stick.
 Needs `mtools` and `openssl` (`lab doctor` checks; `nmap` is optional).
 
+### Arch Linux ARM instead of Raspberry Pi OS
+
+```
+./lab pi setup arch           # same questions and answers as for deb, same card
+```
+
+The card can be reused: run `setup deb` or `setup arch` again to switch distros, each
+build is from scratch. Arch Linux ARM is only published as a root filesystem tarball
+(850 MB, MD5), so `setup arch` assembles the whole image itself without root: a
+partition table, a 512 MiB FAT32 `/boot`, an ext4 root filled from the tarball under
+`fakeroot`. The default user `alarm` is renamed to yours and root is locked. Wi-Fi goes
+through `wpa_supplicant`, and only the hashed PSK is stored on the card, not your
+passphrase. Arch has no `sudo`, so the package is downloaded, SHA-256 checked and
+installed offline on first boot. That first boot also grows the root partition and
+initialises the pacman keyring; once online, `htop`, `vim` and `stress-ng` are installed
+(retried until they succeed, allow a few minutes).
+
+`lab pi kernel install/status/stock` and `lab pi stress` detect the OS over ssh
+(`/etc/os-release`) and adapt: Arch keeps its boot files in `/boot` (U-Boot, no
+`cmdline.txt`), so install writes `/boot/klab/cmdline.txt` for the root PARTUUID and
+selects it with `os_prefix=klab/`, and the stock kernel stays the fallback. The kernel
+config for `lab build --arch pi` is read from the embedded config (IKCONFIG) of the
+Pi's stock `/boot/Image.gz`, cached as `arch-<version>.config`. `lab pi stress` records
+the OS and the stress-ng version, and `lab compare` warns when they differ. Extra
+tools for building the image: `fakeroot`, `dosfstools`, `mtools` (`make deps-pi`).
+The image boot itself (U-Boot, `klab/kernel8.img`) is untested on real hardware as of
+writing, so report what you see on the first Arch boot.
+
 ### Custom kernels on the Pi
 
 Build your own kernel and boot the Pi with it. The Pi must already be set up and
@@ -393,6 +421,12 @@ reachable (`lab pi shell` works), and the host needs the cross-compiler
 
 # in case of issues only
 ./lab pi kernel stock --reboot                   # (optional)back to the stock Raspberry Pi OS kernel
+```
+
+Note: on arch by default you may have perf issues, add this to your boot/config.txt
+```
+temp_limit=80
+# arm_freq=1200 cap freq to 1200 ghZ in case of overheats
 ```
 
 The **build name** is what you pass to `lab pi kernel install` and what identifies the

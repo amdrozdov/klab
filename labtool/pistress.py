@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -28,14 +29,10 @@ METRIC_KEY = "bogo-ops-per-second-real-time"
 GRACE = 60
 
 STRESS_NG_PRESENT = "command -v stress-ng >/dev/null && echo yes || echo no"
-INSTALL = (
-    "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y stress-ng || "
-    "{ sudo apt-get update && "
-    "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y stress-ng; }"
-)
 # What the run records about the Pi before and after (read-only).
 FACTS = r"""echo "kernel=$(uname -r)"
-echo "hostname=$(hostname)"
+echo "hostname=$(uname -n)"
+echo "os=$(. /etc/os-release; echo $ID)"
 echo "model=$(tr -d '\0' </proc/device-tree/model 2>/dev/null)"
 echo "cpus=$(nproc)"
 echo "mem_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
@@ -43,7 +40,7 @@ echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/de
 echo "temp_mc=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)"
 echo "load=$(cut -d' ' -f1-3 /proc/loadavg)"
 echo "stress_ng=$(stress-ng --version 2>&1 | head -1)"
-cat /boot/firmware/klab/BUILD 2>/dev/null
+cat /boot/firmware/klab/BUILD /boot/klab/BUILD 2>/dev/null || true
 """
 END_FACTS = r"""echo "temp_mc=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)"
 echo "load=$(cut -d' ' -f1-3 /proc/loadavg)"
@@ -146,6 +143,12 @@ def metric_of(yaml_text: str, stressor: str) -> float:
     return found[stressor][METRIC_KEY]
 
 
+def stress_ng_version(text: str) -> str:
+    """'0.19.02' from `stress-ng, version 0.19.02 (gcc ..., Linux 6.18.55-klab-x)`."""
+    m = re.search(r"version (\S+)", text)
+    return m.group(1) if m else ""
+
+
 def running_build(facts: dict[str, str]) -> str:
     """The klab build the Pi is running, or 'stock' for any other kernel."""
     if facts.get("build") and facts.get("release") == facts.get("kernel"):
@@ -208,7 +211,9 @@ def build_result(
             "workers": workers,
         },
         "telemetry": False,
+        "os": "arch" if facts.get("os") in ("arch", "archarm") else "deb",
         "stress_ng": facts.get("stress_ng", ""),
+        "stress_ng_version": stress_ng_version(facts.get("stress_ng", "")),
         "host": {
             "hostname": facts.get("hostname", ""),
             "cpu": f"{facts.get('model', 'Raspberry Pi')} ({cpus} cores)",
@@ -241,17 +246,18 @@ def stress(
     if repeat < 1 or timeout < 1 or (workers is not None and workers < 1):
         raise LabError("--repeat, --timeout and --workers must be at least 1")
     conn = pi.connection()
+    os_ = pi.detect_os(conn)
     if common.DRY:
         info(f"{profile}: {len(stressors)} stressors x{repeat}, {timeout}s each")
         show(conn.argv([STRESS_NG_PRESENT]))
-        show(conn.argv([INSTALL]))
+        show(conn.argv([os_.pkg_install]))
         for s in stressors:
             show(conn.argv([stressor_command(s, workers or "<cpus>", timeout)]))
         return None
 
     if pi.remote(conn, STRESS_NG_PRESENT).stdout.strip() != "yes":
-        info("installing stress-ng on the Pi (apt)")
-        pi.remote(conn, INSTALL)
+        info(f"installing stress-ng on the Pi ({os_.title})")
+        pi.remote(conn, os_.pkg_install)
     facts = pi.parse_kv(pi.remote(conn, FACTS).stdout)
     nworkers = workers or int(facts.get("cpus") or 1)
     build = running_build(facts)

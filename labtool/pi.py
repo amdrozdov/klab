@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import common
+from . import common, piarch, pios
 from .common import (
     IMAGES,
     PI_FILE,
@@ -59,11 +59,14 @@ from .common import (
     warn,
 )
 from .kernel import CONFIG_CACHE, build_arch, build_dir, build_meta
+from .pios import OSES, PiOs
 
 OS_LIST_URL = "https://downloads.raspberrypi.com/os_list_imagingutility_v4.json"
 USER_AGENT = "klab (https://github.com/amdrozdov/klab)"
-# `lab pi setup <os>` -> entry name in the Imager OS list.
-OS_CHOICES = {"deb": "Raspberry Pi OS Lite (64-bit)"}
+# `lab pi setup <os>`: the operating systems it can install.
+OS_CHOICES = {name: o.title for name, o in OSES.items()}
+# The ones that come as a ready-made image in the Raspberry Pi Imager OS list.
+IMAGER_ENTRIES = {"deb": "Raspberry Pi OS Lite (64-bit)"}
 CLOUD_INIT_FORMAT = "cloudinit-rpi"
 
 PI_IMAGES = IMAGES / "pi"
@@ -304,9 +307,11 @@ def _fetch_json(url: str) -> Any:
 
 
 def resolve_os_image(os_name: str) -> OsImage:
-    wanted = OS_CHOICES.get(os_name)
+    wanted = IMAGER_ENTRIES.get(os_name)
     if wanted is None:
-        raise LabError(f"unknown OS '{os_name}' (available: {', '.join(OS_CHOICES)})")
+        raise LabError(
+            f"unknown OS '{os_name}' (images are listed for: {', '.join(IMAGER_ENTRIES)})"
+        )
     data = _fetch_json(OS_LIST_URL)
     entry = find_os_entry(data.get("os_list", []), wanted)
     if entry is None:
@@ -682,6 +687,50 @@ def write_image(image: Path, disk: Disk) -> None:
 # --------------------------------------------------------------------------- setup
 
 
+REQUIRED_TOOLS: dict[str, tuple[tuple[str, str], ...]] = {
+    "deb": (("mcopy", "mtools"), ("openssl", "openssl"), ("lsblk", "util-linux")),
+    "arch": (
+        ("mcopy", "mtools"),
+        ("openssl", "openssl"),
+        ("lsblk", "util-linux"),
+        ("fakeroot", "fakeroot"),
+        ("mke2fs", "e2fsprogs"),
+        ("mkfs.vfat", "dosfstools"),
+        ("sfdisk", "fdisk"),
+    ),
+}
+
+
+def _prepare_deb(img: OsImage, s: dict[str, str]) -> Path:
+    """Raspberry Pi OS: a ready image, plus cloud-init files on its boot partition."""
+    base = fetch_image(img)
+    pw_hash = hash_password(s["password"])
+    return customize_image(
+        base, first_boot_files(s, pw_hash), first_boot_files(s, pw_hash, mask=True)
+    )
+
+
+def _prepare_arch(s: dict[str, str]) -> Path:
+    """Arch Linux ARM: build the disk image from the root filesystem tarball."""
+    tarball = piarch.fetch_tarball(PI_IMAGES)
+    sudo_pkg, deps = piarch.fetch_package(PI_IMAGES, "sudo")
+    have_key = bool(s["wifi_ssid"] and s["wifi_psk"])
+    spec = piarch.Spec(
+        user=s["user"],
+        pw_hash=hash_password(s["password"]),
+        hostname=s["hostname"],
+        label_id=piarch.new_label_id(),
+        wifi_ssid=s["wifi_ssid"],
+        wifi_psk_hex=piarch.wpa_psk_hex(s["wifi_ssid"], s["wifi_psk"])
+        if have_key
+        else "",
+        wifi_country=s["wifi_country"],
+        sudo_package=str(sudo_pkg),
+        sudo_deps=tuple(deps),
+    )
+    return piarch.build_image(tarball, spec, PI_IMAGES / "custom.img")
+
+
 def setup(
     os_name: str,
     flags: dict[str, str | None],
@@ -691,45 +740,68 @@ def setup(
     no_write: bool = False,
     keep_image: bool = False,
 ) -> None:
-    """Write Raspberry Pi OS (with user, ssh and Wi-Fi preconfigured) to a stick."""
-    for tool, pkg in (
-        ("mcopy", "mtools"),
-        ("openssl", "openssl"),
-        ("lsblk", "util-linux"),
-    ):
+    """Write an operating system (user, ssh and Wi-Fi preconfigured) to a stick."""
+    if os_name not in OSES:
+        raise LabError(f"unknown OS '{os_name}' (available: {', '.join(OSES)})")
+    for tool, pkg in REQUIRED_TOOLS[os_name]:
         if not have(tool):
             common.dry_or_raise(f"{tool} is required (sudo apt install {pkg})")
-    info("looking up the current Raspberry Pi OS image")
-    img = resolve_os_image(os_name)
-    disk = None if no_write else choose_disk(device, img.size)
+    title = OSES[os_name].title
+    img: OsImage | None = None
+    if os_name == "deb":
+        info("looking up the current Raspberry Pi OS image")
+        img = resolve_os_image(os_name)
+        need = img.size
+        source: dict[str, Any] = {
+            "url": img.url,
+            "sha256": img.sha256,
+            "release": img.release,
+        }
+    else:
+        need = piarch.MIN_DEVICE_BYTES
+        source = {"url": piarch.ARCH_URL, "sha256": "", "release": "latest"}
+    disk = None if no_write else choose_disk(device, need)
     if disk:
         info(f"target: {disk.path}  {disk.label}  {human(disk.size)}")
 
     cfg = load_pi()
     s = collect_settings(cfg, flags, ask)
-    save_pi(os=os_name, url=img.url, sha256=img.sha256, release=img.release, **s)
+    save_pi(os=os_name, **source, **s)
 
-    base = fetch_image(img)
-    pw_hash = hash_password(s["password"])
-    custom = customize_image(
-        base, first_boot_files(s, pw_hash), first_boot_files(s, pw_hash, mask=True)
-    )
+    custom = _prepare_deb(img, s) if img else _prepare_arch(s)
+    if disk and not common.DRY and disk.size < custom.stat().st_size:
+        raise LabError(
+            f"{disk.path} ({human(disk.size)}) is smaller than the image "
+            f"({human(custom.stat().st_size)})"
+        )
     if disk:
         confirm_erase(disk, yes)
         write_image(custom, disk)
         if not common.DRY:
             KNOWN_HOSTS.unlink(missing_ok=True)  # a reflash gets new ssh host keys
-            save_pi(installed_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+            # a fresh card runs its own stock kernel
+            save_pi(installed_at=time.strftime("%Y-%m-%dT%H:%M:%S"), kernel=None)
     if not (keep_image or no_write) and not common.DRY:
-        custom.unlink(missing_ok=True)  # holds the password hash and the Wi-Fi password
+        custom.unlink(missing_ok=True)  # holds the password hash and the Wi-Fi key
 
     if disk:
-        info(f"done: Raspberry Pi OS is on {disk.path}")
+        info(f"done: {title} is on {disk.path}")
+        packages = ", ".join(piarch.FIRST_BOOT_PACKAGES)
+        if os_name == "deb":
+            wait = (
+                "wait 2-3 minutes: the first boot resizes the filesystem and applies "
+                "your settings"
+            )
+        else:
+            wait = (
+                "wait about 5 minutes: the first boot installs sudo and grows the root\n"
+                "     partition; once the network is up it upgrades the system and\n"
+                f"     installs {packages} (log: /var/log/klab-firstboot.log)"
+            )
         print(
             "\nNext:\n"
             "  1. put the stick / SD card in the Pi and power it on\n"
-            "  2. wait 2-3 minutes: the first boot resizes the filesystem and applies "
-            "your settings\n"
+            f"  2. {wait}\n"
             "  3. run: ./lab pi shell"
         )
     else:
@@ -979,30 +1051,14 @@ def show_config(secrets: bool = False) -> None:
 
 # ------------------------------------------------------------------- custom kernels
 #
-# A custom kernel is installed NEXT TO the stock one, never over it. The firmware's
-# `os_prefix=klab/` makes it load kernel8.img, the .dtb files and cmdline.txt from
-# /boot/firmware/klab/ instead of the root of the boot partition; if the kernel or DTB
-# is missing there the firmware ignores the prefix and boots the stock kernel. The
-# modules go to /lib/modules/<release>, where <release> carries the build name
-# (CONFIG_LOCALVERSION=-klab-<build>), so `uname -r` on the Pi names the build.
+# Per-OS paths and snippets live in pios.py; see there for how a kernel is installed.
 
-KLAB_DIR = "boot/firmware/klab"  # in the bundle (relative to /)
-KLAB_BEGIN = "# klab begin (managed by lab pi kernel)"
-KLAB_END = "# klab end"
-# Appended to config.txt: `[all]` makes it apply to every model; auto_initramfs=0 stops
-# the firmware from pairing our kernel with the stock initramfs (our boot drivers are
-# built in, see configs/pi.config).
-KLAB_BLOCK = "\n".join(
-    [KLAB_BEGIN, "[all]", "os_prefix=klab/", "auto_initramfs=0", KLAB_END]
-)
-STRIP_BLOCK = "sed -i '/^# klab begin/,/^# klab end/d' /boot/firmware/config.txt"
 PI4_DTB = "bcm2711-rpi-4-b.dtb"
 
-
-# Picks the STOCK config on the Pi: the Pi 4 flavour (-rpi-v8) of Raspberry Pi OS, else
-# the newest /boot/config-* that is not one of ours. It must not follow `uname -r`: once
-# a klab kernel runs, that would hand back our own previous build as the next base.
-STOCK_CONFIG = "; ".join(
+# Raspberry Pi OS: the stock config is a file in /boot. Pick the Pi 4 flavour (-rpi-v8),
+# else the newest /boot/config-* that is not one of ours. It must not follow `uname -r`:
+# once a klab kernel runs, that would hand back our own previous build as the next base.
+DEB_STOCK_CONFIG = "; ".join(
     [
         "f=$(ls -v /boot/config-*-rpi-v8 2>/dev/null | tail -1)",
         'if [ -z "$f" ]; then '
@@ -1012,12 +1068,44 @@ STOCK_CONFIG = "; ".join(
         'cat "$f"',
     ]
 )
+# Arch Linux ARM has no config file at all, but the stock kernel embeds its own config
+# (CONFIG_IKCONFIG=y): read it out of the stock image in /boot, which our install never
+# touches (the firmware loads ours from klab/ instead).
+ARCH_STOCK_IMAGE = "cat /boot/Image.gz 2>/dev/null || cat /boot/Image"
+
+DETECT_OS = '. /etc/os-release 2>/dev/null; echo "${ID:-unknown} ${ID_LIKE:-}"'
+_OS_CACHE: dict[str, PiOs] = {}
+
+
+def detect_os(conn: Conn) -> PiOs:
+    """The OS running on the Pi, from its /etc/os-release (--dry trusts the saved one)."""
+    saved = str(load_pi().get("os") or pios.DEFAULT_OS)
+    if common.DRY:
+        return OSES.get(saved, OSES[pios.DEFAULT_OS])
+    if conn.host not in _OS_CACHE:
+        found = pios.from_os_release(remote(conn, DETECT_OS).stdout)
+        if found.name != saved:
+            info(f"the Pi runs {found.title} (the saved setting said '{saved}')")
+            save_pi(os=found.name)
+        _OS_CACHE[conn.host] = found
+    return _OS_CACHE[conn.host]
 
 
 def cached_kernel_config() -> Path | None:
-    """The most recently fetched Pi config, if any."""
-    found = sorted(CONFIG_CACHE.glob("pi-*.config"), key=lambda p: p.stat().st_mtime)
+    """The most recently fetched Pi config of the saved OS, if any."""
+    pattern = "arch-*.config" if load_pi().get("os") == "arch" else "*pi-*.config"
+    found = sorted(CONFIG_CACHE.glob(pattern), key=lambda p: p.stat().st_mtime)
     return found[-1] if found else None
+
+
+def remote_raw(conn: Conn, command: str) -> bytes:
+    """Like remote(), but for binary output (a kernel image)."""
+    with askpass_env(conn.password) as env:
+        r = subprocess.run(conn.argv([command]), env=env, capture_output=True)
+    if r.returncode != 0:
+        why = r.stderr.decode(errors="replace").strip() or f"exit {r.returncode}"
+        raise LabError(f"on the Pi ({conn.host}): {why}")
+    return r.stdout
 
 
 def fetch_kernel_config() -> Path:
@@ -1025,15 +1113,21 @@ def fetch_kernel_config() -> Path:
     base of `lab build --arch pi`; if the Pi cannot be reached the cached copy is used."""
     try:
         conn = connection()
-        info(f"reading the stock kernel config of {conn.user}@{conn.host}")
+        os_ = detect_os(conn)
+        info(f"reading the stock kernel config of {conn.user}@{conn.host} ({os_.name})")
         if common.DRY:
-            show(conn.argv([STOCK_CONFIG]))
+            show(conn.argv([DEB_STOCK_CONFIG if os_ is pios.DEB else ARCH_STOCK_IMAGE]))
             return CONFIG_CACHE / "pi-<release>.config"
-        release, _, config = remote(conn, STOCK_CONFIG).stdout.partition("\n")
-        if "CONFIG_" not in config:
-            raise LabError(
-                "the Pi did not return a kernel config (/boot/config-* missing?)"
-            )
+        if os_ is pios.ARCH:
+            config = piarch.extract_ikconfig(remote_raw(conn, ARCH_STOCK_IMAGE))
+            release = "arch-" + piarch.config_version(config)
+        else:
+            release, _, config = remote(conn, DEB_STOCK_CONFIG).stdout.partition("\n")
+            if "CONFIG_" not in config:
+                raise LabError(
+                    "the Pi did not return a kernel config (/boot/config-* missing?)"
+                )
+            release = release.strip()
     except LabError as e:
         cached = cached_kernel_config()
         if cached is None:
@@ -1041,7 +1135,8 @@ def fetch_kernel_config() -> Path:
         warn(f"{e}\nusing the cached Pi config {cached.name} instead")
         return cached
     CONFIG_CACHE.mkdir(parents=True, exist_ok=True)
-    path = CONFIG_CACHE / f"pi-{release.strip()}.config"
+    path = CONFIG_CACHE / (release if release.startswith("arch-") else f"pi-{release}")
+    path = path.with_name(path.name + ".config")
     path.write_text(config)
     return path
 
@@ -1052,9 +1147,9 @@ def _as_root(ti: tarfile.TarInfo) -> tarfile.TarInfo:
     return ti
 
 
-def make_bundle(build: str) -> Path:
+def make_bundle(build: str, os_: PiOs = pios.DEB, country: str | None = None) -> Path:
     """builds/<build>/pi-bundle.tar.gz: everything `lab pi kernel install` puts on the
-    Pi, laid out relative to / (kernel + DTBs + cmdline into klab/, modules)."""
+    Pi, laid out relative to / (kernel + DTBs into klab/, modules, install.sh)."""
     meta = build_meta(build)
     if build_arch(build) != "pi":
         raise LabError(
@@ -1071,6 +1166,7 @@ def make_bundle(build: str) -> Path:
         raise LabError(f"build '{build}' has no {PI4_DTB}; is CONFIG_ARCH_BCM2835 set?")
 
     bundle = out / "pi-bundle.tar.gz"
+    klab = os_.bundle_prefix
     skip = {f"lib/modules/{release}/build", f"lib/modules/{release}/source"}
 
     def keep(ti: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -1081,58 +1177,23 @@ def make_bundle(build: str) -> Path:
         ti.size, ti.mode = len(data), 0o644
         tf.addfile(_as_root(ti), io.BytesIO(data))
 
+    script = os_.install_script(str(release), country)
     with tarfile.open(bundle, "w:gz") as tf:
-        tf.add(image, f"{KLAB_DIR}/kernel8.img", filter=_as_root)
+        tf.add(image, f"{klab}/kernel8.img", filter=_as_root)
         for name, path in dtbs.items():
-            tf.add(path, f"{KLAB_DIR}/{name}", filter=_as_root)
+            tf.add(path, f"{klab}/{name}", filter=_as_root)
         # Overlays are only loaded from klab/ if this file exists; stock overlays are
-        # written for the Raspberry Pi fork's device tree, not for ours.
-        add_bytes(tf, f"{KLAB_DIR}/overlays/README", b"")
-        add_bytes(tf, f"{KLAB_DIR}/BUILD", f"build={build}\nrelease={release}\n".encode())
-        add_bytes(tf, f"{KLAB_DIR}/install.sh", install_script(str(release)).encode())
+        # written for the stock kernel's device tree, not for ours.
+        add_bytes(tf, f"{klab}/overlays/README", b"")
+        add_bytes(tf, f"{klab}/BUILD", f"build={build}\nrelease={release}\n".encode())
+        add_bytes(tf, f"{klab}/install.sh", script.encode())
         tf.add(modules, f"lib/modules/{release}", filter=keep)
     return bundle
-
-
-def config_edit_script(config: str = "/boot/firmware/config.txt") -> str:
-    """Shell lines that (re)write the klab block at the end of config.txt."""
-    return "\n".join(
-        [
-            f"sed -i '/^{KLAB_BEGIN[:6]} begin/,/^{KLAB_END}/d' {config}",
-            f"printf '\\n%s\\n' {shlex.quote(KLAB_BLOCK)} >> {config}",
-        ]
-    )
-
-
-def install_script(release: str) -> str:
-    """klab/install.sh, shipped in the bundle and run as root on the Pi after unpacking
-    (it is also what a first-boot install would run)."""
-    return "\n".join(
-        [
-            "#!/bin/sh",
-            "# Written by `lab pi kernel install`.",
-            "set -e",
-            f"depmod -a {shlex.quote(release)}",
-            "# cmdline.txt carries a PARTUUID that changes at the image's first boot, so",
-            "# copy the live file instead of shipping one.",
-            "cp /boot/firmware/cmdline.txt /boot/firmware/klab/cmdline.txt",
-            config_edit_script(),
-            "sync",
-            "",
-        ]
-    )
 
 
 def parse_kv(text: str) -> dict[str, str]:
     """'key=value' lines -> dict (other lines ignored)."""
     return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
-
-
-UNPACK = "sudo tar -xzf - -C / && sudo sh /boot/firmware/klab/install.sh"
-STOCK = (
-    "if grep -q '^# klab begin' /boot/firmware/config.txt; then "
-    f"sudo {STRIP_BLOCK}; fi; sync"
-)
 
 
 def reboot_pi(conn: Conn) -> None:
@@ -1146,26 +1207,32 @@ def kernel_install(build: str | None, reboot: bool = False) -> None:
     if not build:
         raise LabError("no Pi build given (and none built yet): `lab build --arch pi`")
     conn = connection()
+    os_ = detect_os(conn)
     release = str(build_meta(build).get("kernelrelease") or "<release>")
     if common.DRY:
         info(
             f"bundle: builds/{build}/pi-bundle.tar.gz (kernel, DTBs, modules, install.sh)"
         )
-        show([*conn.argv([UNPACK]), "<", f"builds/{build}/pi-bundle.tar.gz"])
+        show([*conn.argv([os_.unpack]), "<", f"builds/{build}/pi-bundle.tar.gz"])
         return
 
-    bundle = make_bundle(build)
+    bundle = make_bundle(build, os_, load_pi().get("wifi_country") or None)
     size = human(bundle.stat().st_size)
     info(f"installing {build} ({release}) on {conn.user}@{conn.host} ({size})")
     with tarfile.open(bundle) as tf:
-        need = sum(m.size for m in tf.getmembers() if m.name.startswith(KLAB_DIR))
-    free = int(remote(conn, "df --output=avail -B1 /boot/firmware | tail -1").stdout)
-    if free < need * 1.2:
-        raise LabError(
-            f"/boot/firmware on the Pi has {human(free)} free, "
-            f"the kernel needs {human(need)}"
-        )
-    remote(conn, UNPACK, stdin=bundle)
+        members = tf.getmembers()
+    need_boot = sum(m.size for m in members if m.name.startswith(os_.bundle_prefix))
+    need_root = sum(m.size for m in members if m.name.startswith("lib/modules/"))
+    for path, need, what in (
+        (os_.fw, need_boot, "the kernel"),
+        ("/lib/modules", need_root, "the modules"),
+    ):
+        free = int(remote(conn, f"df --output=avail -B1 {path} | tail -1").stdout)
+        if free < need * 1.2:
+            raise LabError(
+                f"{path} on the Pi has {human(free)} free, {what} needs {human(need)}"
+            )
+    remote(conn, os_.unpack, stdin=bundle)
     save_pi(kernel={"build": build, "release": release, "installed_at": _now()})
     if reboot:
         info("rebooting the Pi")
@@ -1182,14 +1249,13 @@ def kernel_install(build: str | None, reboot: bool = False) -> None:
 def kernel_stock(reboot: bool = False) -> None:
     """Go back to the stock kernel: remove the klab block from config.txt."""
     conn = connection()
+    os_ = detect_os(conn)
     if common.DRY:
-        show(conn.argv([STOCK]))
+        show(conn.argv([os_.stock]))
         return
-    remote(conn, STOCK)
+    remote(conn, os_.stock)
     save_pi(kernel=None)
-    info(
-        "config.txt no longer selects the klab kernel (files stay in /boot/firmware/klab)"
-    )
+    info(f"{os_.config_txt} no longer selects the klab kernel (files stay in {os_.klab})")
     if reboot:
         reboot_pi(conn)
         print("rebooting; check with ./lab pi kernel status in a minute")
@@ -1197,29 +1263,19 @@ def kernel_stock(reboot: bool = False) -> None:
         print("Reboot to use the stock kernel:  ./lab pi shell -- sudo reboot")
 
 
-STATUS_SCRIPT = "; ".join(
-    [
-        'echo "running=$(uname -r)"',
-        'echo "built=$(uname -v)"',
-        "echo \"model=$(tr -d '\\\\0' </proc/device-tree/model)\"",
-        "if grep -q '^# klab begin' /boot/firmware/config.txt; then echo selected=klab; "
-        "else echo selected=stock; fi",
-        "cat /boot/firmware/klab/BUILD 2>/dev/null || true",
-    ]
-)
-
-
 def kernel_status() -> None:
     conn = connection()
+    os_ = detect_os(conn)
     if common.DRY:
-        show(conn.argv([STATUS_SCRIPT]))
+        show(conn.argv([os_.status_script]))
         return
-    s = parse_kv(remote(conn, STATUS_SCRIPT).stdout)
+    s = parse_kv(remote(conn, os_.status_script).stdout)
     running, installed = s.get("running", "?"), s.get("release")
     rows = [
         ["running kernel", running],
         ["built", s.get("built", "?")],
         ["board", s.get("model", "?")],
+        ["operating system", s.get("os", os_.title)],
         [
             "config.txt boots",
             "klab kernel" if s.get("selected") == "klab" else "stock kernel",

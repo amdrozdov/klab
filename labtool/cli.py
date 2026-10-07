@@ -53,6 +53,8 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         ("ccache", "much faster rebuilds"),
         ("aarch64-linux-gnu-gcc", "build for the Pi: apt install gcc-aarch64-linux-gnu"),
         ("mcopy", "lab pi setup: apt install mtools"),
+        ("fakeroot", "lab pi setup arch: apt install fakeroot"),
+        ("mkfs.vfat", "lab pi setup arch: apt install dosfstools"),
         ("openssl", "lab pi setup: password hashing"),
         ("nmap", "find the Pi on your network: apt install nmap"),
         (
@@ -741,7 +743,9 @@ def parser() -> argparse.ArgumentParser:
         help="write Raspberry Pi OS to a USB/SD stick with user, ssh and Wi-Fi preset",
     )
     r.add_argument(
-        "os", choices=sorted(pi.OS_CHOICES), help="deb = Raspberry Pi OS Lite (Debian)"
+        "os",
+        choices=sorted(pi.OS_CHOICES),
+        help="deb = Raspberry Pi OS Lite (Debian) | arch = Arch Linux ARM",
     )
     r.add_argument(
         "-d", "--device", help="target disk, e.g. /dev/sdb (default: autodetect)"

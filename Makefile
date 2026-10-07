@@ -11,7 +11,7 @@
 #   make clean                     delete all lab data (trees, builds, rootfs, runs); asks [y/N]
 #   make lint / make typecheck     run ruff / mypy over labtool (dev tools: uv sync)
 #   make test                      unit tests (tests/)
-#   make deps-pi                   cross-compiler + mtools for Raspberry Pi builds (lab pi)
+#   make deps-pi                   cross-compiler + mtools/fakeroot/dosfstools for Raspberry Pi builds (lab pi)
 #   any target + DRY=1             only print the commands (e.g. make boot DRY=1)
 
 LAB      := ./lab $(if $(DRY),--dry)
@@ -33,7 +33,7 @@ deps:
 		ccache dwarves qemu-system-x86 gdb
 
 deps-pi:
-	sudo apt install -y gcc-aarch64-linux-gnu mtools
+	sudo apt install -y gcc-aarch64-linux-gnu mtools fakeroot dosfstools
 
 lint:
 	uv run ruff check labtool tests

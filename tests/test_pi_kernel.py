@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from labtool import common, kernel, pi, vm
+from labtool import common, kernel, pi, pios, vm
 from labtool.common import LabError
 
 
@@ -173,7 +173,7 @@ class TestConfigBlock(unittest.TestCase):
             cfg = Path(d) / "config.txt"
             cfg.write_text(self.STOCK)
             for _ in range(2):  # installing twice must not stack blocks
-                self.run_sh(pi.config_edit_script(str(cfg)))
+                self.run_sh(pios.DEB.config_edit_script(str(cfg)))
             text = cfg.read_text()
             self.assertEqual(text.count("os_prefix=klab/"), 1)
             self.assertEqual(text.count("# klab begin"), 1)
@@ -181,12 +181,12 @@ class TestConfigBlock(unittest.TestCase):
             self.assertTrue(
                 text.startswith(self.STOCK)
             )  # stock lines untouched, block last
-            self.run_sh(pi.STRIP_BLOCK.replace("/boot/firmware/config.txt", str(cfg)))
+            self.run_sh(pios.DEB.strip_block(str(cfg)))
             self.assertEqual(cfg.read_text().strip(), (self.STOCK + "\n").strip())
 
     def test_stock_command_only_touches_files_that_have_the_block(self) -> None:
-        self.assertIn("grep -q '^# klab begin' /boot/firmware/config.txt", pi.STOCK)
-        self.assertIn("sudo sed -i", pi.STOCK)
+        self.assertIn("grep -q '^# klab begin' /boot/firmware/config.txt", pios.DEB.stock)
+        self.assertIn("sudo sed -i", pios.DEB.stock)
 
 
 class TestRemoteInstall(FakePiBuild):
@@ -200,6 +200,9 @@ class TestRemoteInstall(FakePiBuild):
             self.addCleanup(patcher.stop)
         self.conn = pi.Conn("alice", "pw", "10.0.0.5", 22)
         self.calls: list[tuple[str, Path | None]] = []
+        detect = mock.patch.object(pi, "detect_os", return_value=pios.DEB)
+        detect.start()
+        self.addCleanup(detect.stop)
 
     def fake_remote(self, free: int = 10**9) -> mock.Mock:
         def remote(conn: pi.Conn, command: str, stdin: Path | None = None) -> mock.Mock:
@@ -218,8 +221,8 @@ class TestRemoteInstall(FakePiBuild):
             pi.kernel_install(self.name)
         commands = [c for c, _ in self.calls]
         self.assertTrue(commands[0].startswith("df --output=avail"))
-        self.assertEqual(commands[1], pi.UNPACK)
-        self.assertEqual(self.calls[1][1], self.out / "pi-bundle.tar.gz")  # fed to stdin
+        self.assertEqual(commands[2], pios.DEB.unpack)  # after the two free-space checks
+        self.assertEqual(self.calls[2][1], self.out / "pi-bundle.tar.gz")  # fed to stdin
         saved = pi.load_pi()["kernel"]
         self.assertEqual((saved["build"], saved["release"]), (self.name, self.release))
 
@@ -275,7 +278,7 @@ class TestRemoteInstall(FakePiBuild):
             mock.patch.object(pi, "remote", self.fake_remote()),
         ):
             pi.kernel_stock()
-        self.assertEqual(self.calls[0][0], pi.STOCK)
+        self.assertEqual(self.calls[0][0], pios.DEB.stock)
         self.assertIsNone(pi.load_pi()["kernel"])
 
     def test_status_verdicts(self) -> None:
@@ -299,6 +302,11 @@ class TestRemoteInstall(FakePiBuild):
 
 
 class TestFetchConfig(unittest.TestCase):
+    def setUp(self) -> None:
+        detect = mock.patch.object(pi, "detect_os", return_value=pios.DEB)
+        detect.start()
+        self.addCleanup(detect.stop)
+
     def test_reads_the_running_kernels_config_and_caches_it(self) -> None:
         conn = pi.Conn("a", "p", "h", 22)
         with (
@@ -317,10 +325,10 @@ class TestFetchConfig(unittest.TestCase):
 
     def test_always_asks_for_the_stock_config_not_the_running_one(self) -> None:
         # a running klab kernel must never become the next build's base
-        self.assertIn("/boot/config-*-rpi-v8", pi.STOCK_CONFIG)
-        self.assertIn("grep -v -- -klab-", pi.STOCK_CONFIG)
-        self.assertNotIn("uname", pi.STOCK_CONFIG)
-        self.assertNotIn("/proc/config.gz", pi.STOCK_CONFIG)
+        self.assertIn("/boot/config-*-rpi-v8", pi.DEB_STOCK_CONFIG)
+        self.assertIn("grep -v -- -klab-", pi.DEB_STOCK_CONFIG)
+        self.assertNotIn("uname", pi.DEB_STOCK_CONFIG)
+        self.assertNotIn("/proc/config.gz", pi.DEB_STOCK_CONFIG)
 
     def test_stock_config_selection_with_real_sh(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -331,7 +339,7 @@ class TestFetchConfig(unittest.TestCase):
                 ("config-6.18.55-klab-mine", "CONFIG_MINE=y\n"),
             ):
                 (boot / name).write_text(body)
-            script = pi.STOCK_CONFIG.replace("/boot/", f"{d}/")
+            script = pi.DEB_STOCK_CONFIG.replace("/boot/", f"{d}/")
             out = subprocess.run(
                 ["sh", "-c", script], capture_output=True, text=True
             ).stdout
@@ -341,6 +349,7 @@ class TestFetchConfig(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as d,
             mock.patch.object(pi, "CONFIG_CACHE", Path(d)),
+            mock.patch.object(pi, "PI_FILE", Path(d) / "pi.json"),
         ):
             cached = Path(d) / "pi-6.18.50+rpt-rpi-v8.config"
             cached.write_text("CONFIG_A=y\n")
