@@ -589,6 +589,19 @@ def resolve_base_config(source: str, version: str, arch: str) -> Path:
     return p.resolve()
 
 
+def link_compile_commands(cc: Path, link: Path) -> None:
+    """Point <tree>/compile_commands.json at this build's, for clangd. A working link
+    (or a real file) is left alone; one left behind by a removed build is replaced.
+    Never fails the build: it is only a convenience."""
+    try:
+        if link.is_symlink() and not link.exists():  # its build was deleted
+            link.unlink()
+        if cc.exists() and not link.exists():
+            link.symlink_to(cc)
+    except OSError as e:
+        warn(f"could not link {link} to {cc}: {e}")
+
+
 LOCALVERSION_MAX = 64  # the kernel release string (uname -r) is limited to 64 bytes
 
 
@@ -812,16 +825,15 @@ def build(
         dtbroot = out / "dtbroot"
         remove_tree(dtbroot)
         run([*make, f"INSTALL_DTBS_PATH={dtbroot}", "dtbs_install"])
-    # compile_commands.json for clangd/VS Code navigation of this exact config.
-    run([*make, "compile_commands.json"], check=False)
     cc = out / "compile_commands.json"
     link = src / "compile_commands.json"
     if common.DRY:
+        run([*make, "compile_commands.json"], check=False)
         show(["ln", "-sfn", cc, link])
         return name
-    if cc.exists() and not link.exists():
-        link.symlink_to(cc)
 
+    # Record the finished build first: what comes after is only a convenience and must
+    # never leave a complete build without its metadata.
     release = output(["make", "-s", "-C", src, f"O={out}", "kernelrelease"])
     info_meta = tree_info(tree)
     meta.update(
@@ -831,6 +843,10 @@ def build(
         config_hash=config_hash(out),
     )
     (out / "lab-build.json").write_text(json.dumps(meta, indent=2) + "\n")
+
+    # compile_commands.json for clangd/VS Code navigation of this exact config.
+    run([*make, "compile_commands.json"], check=False)
+    link_compile_commands(cc, link)
     nxt = f"lab pi kernel install {name}" if pi else f"lab boot {name}"
     info(f"built {name}: {release}  (next: {nxt})")
     return name
